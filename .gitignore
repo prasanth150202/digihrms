@@ -1,0 +1,7 @@
+# Credentials — never commit these
+.env
+
+# Uploads / generated
+uploads/
+*.log
+vendor/
