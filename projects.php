@@ -47,16 +47,50 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 
 }
 
+// ── Resolve TL's department ───────────────────────────────────────────
+$u         = current_user();
+$is_tl     = $u['role'] === 'TEAM_LEAD';
+$tl_dept_id = null;
+if ($is_tl) {
+    $s = $conn->prepare("
+        SELECT er.dept_id FROM employee_roles er
+        JOIN employees e ON e.id = er.employee_id
+        JOIN users u2 ON u2.email = e.email
+        WHERE u2.id = ? AND er.is_team_lead = 1 LIMIT 1
+    ");
+    $s->execute([$u['id']]);
+    $v = $s->fetchColumn();
+    $tl_dept_id = $v ? (int)$v : null;
+}
+
 // ── Fetch projects with task counts ──────────────────────────────────
-$projects = $conn->query("
-    SELECT p.*,
-           COUNT(t.id) AS task_count,
-           SUM(CASE WHEN t.status='DONE' THEN 1 ELSE 0 END) AS done_count
-    FROM projects p
-    LEFT JOIN tasks t ON t.project_id = p.id AND t.deleted_at IS NULL
-    GROUP BY p.id
-    ORDER BY p.status DESC, p.name ASC
-")->fetchAll();
+// TEAM_LEAD: only projects that have at least one task assigned to their dept
+if ($is_tl && $tl_dept_id) {
+    $stmt = $conn->prepare("
+        SELECT p.*,
+               COUNT(DISTINCT t.id) AS task_count,
+               SUM(CASE WHEN t.status='DONE' THEN 1 ELSE 0 END) AS done_count
+        FROM projects p
+        JOIN tasks t ON t.project_id = p.id AND t.deleted_at IS NULL
+        JOIN users  u2 ON u2.id = t.assigned_to
+        JOIN employees e ON e.email = u2.email
+        WHERE e.dept_id = ?
+        GROUP BY p.id
+        ORDER BY p.status DESC, p.name ASC
+    ");
+    $stmt->execute([$tl_dept_id]);
+    $projects = $stmt->fetchAll();
+} else {
+    $projects = $conn->query("
+        SELECT p.*,
+               COUNT(t.id) AS task_count,
+               SUM(CASE WHEN t.status='DONE' THEN 1 ELSE 0 END) AS done_count
+        FROM projects p
+        LEFT JOIN tasks t ON t.project_id = p.id AND t.deleted_at IS NULL
+        GROUP BY p.id
+        ORDER BY p.status DESC, p.name ASC
+    ")->fetchAll();
+}
 
 $active_count   = count(array_filter($projects, fn($p) => $p['status'] === 'ACTIVE'));
 $inactive_count = count(array_filter($projects, fn($p) => $p['status'] === 'INACTIVE'));
@@ -145,10 +179,12 @@ include 'header.php';
 
 <!-- Page header -->
 <div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-2">
-    <p class="text-muted small mb-0">Create and manage projects to organise tasks.</p>
+    <p class="text-muted small mb-0"><?= $is_tl ? 'Projects with tasks assigned to your team.' : 'Create and manage projects to organise tasks.' ?></p>
+    <?php if (!$is_tl): ?>
     <button type="button" class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#projModal">
         <i class="bi bi-plus-lg me-1"></i>Add Project
     </button>
+    <?php endif; ?>
 </div>
 
 <!-- Stat cards — using HRMS design system -->
@@ -237,17 +273,21 @@ include 'header.php';
 
     <!-- Footer actions -->
     <div class="proj-card-footer">
+        <?php if (!$is_tl): ?>
         <button type="button" class="btn btn-sm btn-outline-primary flex-fill"
             onclick="openEdit(<?= htmlspecialchars(json_encode($p), ENT_QUOTES) ?>)">
             <i class="bi bi-pencil me-1"></i>Edit
         </button>
+        <?php endif; ?>
         <a href="tasks.php?project=<?= $p['id'] ?>" class="btn btn-sm btn-outline-secondary flex-fill">
             <i class="bi bi-list-task me-1"></i>Tasks
         </a>
+        <?php if (!$is_tl): ?>
         <button type="button" class="btn btn-sm btn-outline-danger"
             onclick="deleteProject(<?= $p['id'] ?>, '<?= addslashes(sanitize($p['name'])) ?>')">
             <i class="bi bi-trash3"></i>
         </button>
+        <?php endif; ?>
     </div>
 </div>
 <?php endforeach; ?>
