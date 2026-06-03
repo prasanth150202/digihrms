@@ -511,7 +511,9 @@
     (async function initHrmsPush() {
       if (!('serviceWorker' in navigator) || !('Notification' in window)) return;
       try {
-        const reg  = await navigator.serviceWorker.register('/hrms/php_implementation/firebase-messaging-sw.js', { scope: '/hrms/php_implementation/' });
+        const swPath = location.pathname.includes('/hrms/') ? '/hrms/php_implementation/firebase-messaging-sw.js' : '/php_implementation/firebase-messaging-sw.js';
+        const swScope = location.pathname.includes('/hrms/') ? '/hrms/php_implementation/' : '/php_implementation/';
+        const reg  = await navigator.serviceWorker.register(swPath, { scope: swScope });
         const perm = await Notification.requestPermission();
         if (perm !== 'granted') return;
         const messaging = firebase.messaging();

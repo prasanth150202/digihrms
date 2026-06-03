@@ -1,8 +1,13 @@
 <?php
 // push_helper.php — send FCM push to an HRMS user (by users.id)
 
-define('HRMS_FCM_PROJECT_ID',      'digifyce-internal');
-define('HRMS_FCM_SERVICE_ACCOUNT', __DIR__ . '/../../diigiops/firebase-service-account.json');
+define('HRMS_FCM_PROJECT_ID', 'digifyce-internal');
+// Check local copy first (production), fall back to shared diigiops path (local dev)
+define('HRMS_FCM_SERVICE_ACCOUNT',
+    file_exists(__DIR__ . '/firebase-service-account.json')
+        ? __DIR__ . '/firebase-service-account.json'
+        : __DIR__ . '/../../diigiops/firebase-service-account.json'
+);
 
 function _hrmsFcmAccessToken(): ?string {
     static $cached = null;
@@ -55,7 +60,7 @@ function hrmsPushUser(PDO $conn, int $userId, string $title, string $body, strin
         $accessToken = _hrmsFcmAccessToken();
         if (!$accessToken) return;
 
-        $baseUrl = 'http://localhost/hrms/php_implementation';
+        $baseUrl = rtrim($_ENV['APP_URL'] ?? 'https://hrms.digifyce.com', '/') . '/php_implementation';
         $url     = 'https://fcm.googleapis.com/v1/projects/' . HRMS_FCM_PROJECT_ID . '/messages:send';
 
         foreach ($tokens as $token) {

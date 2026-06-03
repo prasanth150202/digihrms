@@ -1,5 +1,6 @@
 # Credentials — never commit these
 .env
+firebase-service-account.json
 
 # Uploads / generated
 uploads/

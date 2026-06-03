@@ -12,23 +12,25 @@ firebase.initializeApp({
 
 const messaging = firebase.messaging();
 
+const BASE = self.location.pathname.includes('/hrms/') ? '/hrms/php_implementation' : '/php_implementation';
+
 messaging.onBackgroundMessage(function(payload) {
   const { title, body, icon, click_action } = payload.notification || {};
   self.registration.showNotification(title || 'HRMS', {
     body:  body  || '',
-    icon:  icon  || '/hrms/php_implementation/assets/icon-192.png',
-    badge: '/hrms/php_implementation/assets/icon-192.png',
-    data:  { url: click_action || '/hrms/php_implementation/' },
+    icon:  icon  || BASE + '/assets/icon-192.png',
+    badge: BASE + '/assets/icon-192.png',
+    data:  { url: click_action || BASE + '/' },
   });
 });
 
 self.addEventListener('notificationclick', function(event) {
   event.notification.close();
-  const url = event.notification.data?.url || '/hrms/php_implementation/';
+  const url = event.notification.data?.url || BASE + '/';
   event.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function(list) {
       for (const c of list) {
-        if (c.url.includes('/hrms/php_implementation/') && 'focus' in c) return c.focus();
+        if (c.url.includes(BASE) && 'focus' in c) return c.focus();
       }
       return clients.openWindow(url);
     })
