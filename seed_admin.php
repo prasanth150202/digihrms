@@ -2,8 +2,8 @@
 require_once 'config.php';
 
 $name     = "Super Admin";
-$email    = "admin@hrms.com";
-$password = "Admin@1234";
+$email    = "Admin@digifyce.com";
+$password = "Digi2025#";
 $role     = "SUPER_ADMIN";
 
 // Check if already seeded
