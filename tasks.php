@@ -6,6 +6,9 @@ require_once 'digiops_sync_helper.php';
 require_login();
 $page      = 'tasks';
 $pageTitle = 'Task Management';
+
+// One-time migration: ensure completion_note column exists
+try { $conn->exec("ALTER TABLE task_approvals ADD COLUMN completion_note TEXT NULL DEFAULT NULL"); } catch (PDOException $e) {}
 $u         = current_user();
 $uid       = $u['id'];
 $role      = $u['role'];
@@ -242,27 +245,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 
     // ── Submit task for approval (assignee action) ──────────
     if ($_POST['action'] === 'submit_for_approval') {
-        $tid = (int)$_POST['task_id'];
+        $tid             = (int)$_POST['task_id'];
+        $completion_note = trim($_POST['completion_note'] ?? '');
         $chk = $conn->prepare("SELECT assigned_to, assigned_by, status, needs_approval, title FROM tasks WHERE id=?");
         $chk->execute([$tid]);
         $t_row = $chk->fetch();
         if ($t_row && ($t_row['assigned_to']==$uid || $t_row['assigned_by']==$uid) && !empty($t_row['needs_approval'])) {
+            if (!$completion_note) {
+                if ($is_ajax) ajax_err('Please describe what you completed before submitting.');
+                set_flash('danger', 'Completion note is required before submitting for approval.');
+                header("Location: tasks.php"); exit;
+            }
             // Move to REVIEW
             $conn->prepare("UPDATE tasks SET status='REVIEW', updated_at=NOW() WHERE id=?")->execute([$tid]);
             // Upsert approval record: update existing rework row if present, else insert fresh pending
             $existsAppr = $conn->prepare("SELECT id FROM task_approvals WHERE task_id=? AND status IN ('pending','rework')");
             $existsAppr->execute([$tid]);
             if ($existsAppr->fetchColumn()) {
-                $conn->prepare("UPDATE task_approvals SET status='pending', submitted_by=?, submitted_at=NOW(), reviewed_by=NULL, reviewed_at=NULL, note=NULL WHERE task_id=? AND status IN ('pending','rework')")
-                     ->execute([$uid, $tid]);
+                $conn->prepare("UPDATE task_approvals SET status='pending', submitted_by=?, submitted_at=NOW(), reviewed_by=NULL, reviewed_at=NULL, note=NULL, completion_note=? WHERE task_id=? AND status IN ('pending','rework')")
+                     ->execute([$uid, $completion_note, $tid]);
             } else {
-                $conn->prepare("INSERT INTO task_approvals (task_id, submitted_by, status) VALUES (?,?,'pending')")
-                     ->execute([$tid, $uid]);
+                $conn->prepare("INSERT INTO task_approvals (task_id, submitted_by, status, completion_note) VALUES (?,?,'pending',?)")
+                     ->execute([$tid, $uid, $completion_note]);
             }
-            log_task_activity($conn, $tid, $uid, 'STATUS_CHANGED', "REVIEW — resubmitted for approval");
+            // Save note as a comment too so it's visible in task history
+            $conn->prepare("INSERT INTO task_comments (task_id,user_id,comment) VALUES (?,?,?)")
+                 ->execute([$tid, $uid, "Completion note: $completion_note"]);
+            log_task_activity($conn, $tid, $uid, 'STATUS_CHANGED', "REVIEW — submitted for approval");
             // Notify TL/approvers
             if ($t_row['assigned_by'] && $t_row['assigned_by'] != $uid) {
-                hrms_notify($conn, (int)$t_row['assigned_by'], 'task_approval', 'Task ready for review: '.mb_substr($t_row['title'],0,60), 'Awaiting your approval.', 'tasks.php?tab=approvals');
+                hrms_notify($conn, (int)$t_row['assigned_by'], 'task_approval', 'Task ready for review: '.mb_substr($t_row['title'],0,60), mb_substr($completion_note,0,100), 'tasks.php?tab=approvals');
             }
             // Sync to DigiOps
             _digiops_task_sync($conn, $tid, 'REVIEW');
@@ -793,6 +805,7 @@ if (!$hr_view) {
     if ($is_tl) {
         if ($role === 'SUPER_ADMIN') {
             $s = $conn->query("SELECT t.*, ta.id as approval_id, ta.submitted_at, ta.submitted_by,
+                ta.completion_note,
                 u.name as submitter_name, u2.name as creator_name, p.name as project_name
                 FROM task_approvals ta
                 JOIN tasks t ON t.id = ta.task_id
@@ -805,6 +818,7 @@ if (!$hr_view) {
             // TL sees only their team members' approvals
             $team_ids_str = $my_team ? implode(',', array_map('intval', array_column($my_team, 'id'))) : '0';
             $s = $conn->query("SELECT t.*, ta.id as approval_id, ta.submitted_at, ta.submitted_by,
+                ta.completion_note,
                 u.name as submitter_name, u2.name as creator_name, p.name as project_name
                 FROM task_approvals ta
                 JOIN tasks t ON t.id = ta.task_id
@@ -1544,7 +1558,7 @@ if (!empty($flash)): ?>
                 </a>
                 <?php else: ?>
                 <button type="button" class="btn btn-sm py-0 px-2" style="background:#7c3aed;color:#fff;border:none;border-radius:5px;font-size:.68rem;position:relative;z-index:4;"
-                    onclick="event.stopPropagation();tmAjax('submit_for_approval',<?= $t['id'] ?>,this)">Complete</button>
+                    onclick="event.stopPropagation();openCompletionModal(<?= $t['id'] ?>,'<?= addslashes(sanitize($t['title'])) ?>')">Complete</button>
                 <?php endif; ?>
                 <?php endif; ?>
             </div>
@@ -1578,7 +1592,7 @@ if (!empty($flash)): ?>
                     </a>
                     <?php elseif ($t['needs_approval']): ?>
                     <button type="button" style="background:#ea580c;color:#fff;border:none;border-radius:5px;font-size:.68rem;padding:2px 8px;cursor:pointer;white-space:nowrap"
-                        onclick="event.stopPropagation();tmAjax('submit_for_approval',<?= $t['id'] ?>,this)">Resubmit</button>
+                        onclick="event.stopPropagation();openCompletionModal(<?= $t['id'] ?>,'<?= addslashes(sanitize($t['title'])) ?>')">Resubmit</button>
                     <?php endif; ?>
                     <?php endif; ?>
                 </div>
@@ -1867,7 +1881,7 @@ $kanban_cols = [
                 </a>
                 <?php else: ?>
                 <button class="btn btn-sm ms-auto" style="background:#7c3aed;color:#fff;border:none;border-radius:5px;font-size:.63rem;padding:2px 8px;"
-                    onclick="tmAjax('submit_for_approval',<?= $t['id'] ?>,this)">Complete</button>
+                    onclick="openCompletionModal(<?= $t['id'] ?>,'<?= addslashes(sanitize($t['title'])) ?>')">Complete</button>
                 <?php endif; ?>
             <?php endif; ?>
         </div>
@@ -1893,7 +1907,7 @@ $kanban_cols = [
                     </a>
                     <?php elseif ($t['needs_approval']): ?>
                     <button class="ms-auto" style="background:#ea580c;color:#fff;border:none;border-radius:5px;font-size:.63rem;padding:2px 7px;cursor:pointer;"
-                        onclick="tmAjax('submit_for_approval',<?= $t['id'] ?>,this)">Resubmit</button>
+                        onclick="openCompletionModal(<?= $t['id'] ?>,'<?= addslashes(sanitize($t['title'])) ?>')">Resubmit</button>
                     <?php endif; ?>
                 <?php endif; ?>
             </div>
@@ -2284,6 +2298,18 @@ $type_label = ['document'=>'Document / File','link'=>'Link / URL','text'=>'Text 
                 </h6>
                 <?php if ($t['description']): ?>
                 <p class="text-muted small mb-2" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;"><?= sanitize($t['description']) ?></p>
+                <?php endif; ?>
+                <?php if (!empty($t['completion_note'])): ?>
+                <div style="background:#f0fdf4;border:1px solid #86efac;border-radius:8px;padding:10px 14px;margin-bottom:10px;">
+                    <div style="font-size:.72rem;font-weight:700;color:#166534;margin-bottom:4px;">
+                        <i class="bi bi-pencil-square me-1"></i>Completion Note from <?= sanitize($t['submitter_name'] ?? 'assignee') ?>
+                    </div>
+                    <div style="font-size:.83rem;color:#14532d;line-height:1.5;white-space:pre-wrap;"><?= sanitize($t['completion_note']) ?></div>
+                </div>
+                <?php else: ?>
+                <div style="background:#fefce8;border:1px solid #fde68a;border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:.76rem;color:#92400e;">
+                    <i class="bi bi-exclamation-triangle me-1"></i>No completion note provided.
+                </div>
                 <?php endif; ?>
                 <div class="d-flex align-items-center gap-3 flex-wrap" style="font-size:.78rem;color:#64748b;">
                     <span><i class="bi bi-person-fill me-1"></i>Submitted by <strong style="color:#1e293b;"><?= sanitize($t['submitter_name'] ?? '—') ?></strong></span>
@@ -3252,6 +3278,43 @@ $cal_tasks_json = json_encode(array_values(array_map(function($t) {
     </div>
 </div>
 
+<!-- Completion Note Modal (required before submitting for approval) -->
+<div class="modal fade" id="completionNoteModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered" style="max-width:480px;">
+        <div class="modal-content" style="border-radius:16px;border:none;box-shadow:0 20px 60px rgba(0,0,0,.15);">
+            <input type="hidden" id="cn_task_id">
+            <div class="modal-header border-0 pb-0 pt-4 px-4">
+                <div>
+                    <h5 class="modal-title fw-bold mb-0" style="color:#166534;"><i class="bi bi-pencil-square me-2"></i>Completion Note</h5>
+                    <p class="text-muted small mb-0 mt-1" id="cn_task_title"></p>
+                </div>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body px-4 py-3">
+                <label class="form-label fw-semibold" style="font-size:.82rem;">
+                    What did you complete? <span class="text-danger">*</span>
+                </label>
+                <textarea id="cn_note" class="form-control" rows="4" required
+                    placeholder="Describe what you did, what was delivered, and any relevant details for the reviewer…"
+                    style="border-radius:8px;resize:vertical;"></textarea>
+                <div id="cn_error" class="text-danger mt-1" style="font-size:.78rem;display:none;">
+                    <i class="bi bi-exclamation-circle me-1"></i>Please enter a completion note before submitting.
+                </div>
+                <div class="mt-2 p-2 rounded" style="background:#f0fdf4;border:1px solid #bbf7d0;font-size:.74rem;color:#166534;">
+                    <i class="bi bi-info-circle me-1"></i>This note will be shown to your reviewer and saved in the task history.
+                </div>
+            </div>
+            <div class="modal-footer border-0 px-4 pb-4 pt-2 gap-2">
+                <button type="button" class="btn" data-bs-dismiss="modal" style="background:#f1f5f9;border:none;border-radius:8px;color:#475569;">Cancel</button>
+                <button type="button" class="btn btn-success" style="border-radius:8px;" id="cn_submit_btn"
+                    onclick="submitCompletionNote(this)">
+                    <i class="bi bi-send-check me-1"></i>Submit for Review
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- Rework Modal (for approvals) -->
 <div class="modal fade" id="reworkModal" tabindex="-1">
     <div class="modal-dialog modal-dialog-centered">
@@ -3818,6 +3881,41 @@ document.querySelectorAll('.appr-info-tip').forEach(function(el) {
 // ─────────────────────────────────────────────────────────────
 // AJAX HELPERS — replace all form-based page reloads
 // ─────────────────────────────────────────────────────────────
+
+function openCompletionModal(taskId, title) {
+    document.getElementById('cn_task_id').value = taskId;
+    document.getElementById('cn_task_title').textContent = title || '';
+    document.getElementById('cn_note').value = '';
+    document.getElementById('cn_error').style.display = 'none';
+    new bootstrap.Modal(document.getElementById('completionNoteModal')).show();
+    setTimeout(() => document.getElementById('cn_note').focus(), 350);
+}
+
+async function submitCompletionNote(btn) {
+    const taskId = document.getElementById('cn_task_id').value;
+    const note   = document.getElementById('cn_note').value.trim();
+    const errEl  = document.getElementById('cn_error');
+    if (!note) { errEl.style.display = 'block'; document.getElementById('cn_note').focus(); return; }
+    errEl.style.display = 'none';
+    const orig = btn.innerHTML;
+    btn.disabled = true; btn.innerHTML = '<span class="hc-spinner"></span> Submitting…';
+    const fd = new FormData();
+    fd.append('action', 'submit_for_approval');
+    fd.append('task_id', taskId);
+    fd.append('completion_note', note);
+    fd.append('_ajax', '1');
+    try {
+        const r = await fetch('tasks.php', { method: 'POST', body: fd, credentials: 'same-origin' });
+        const d = await r.json();
+        if (!d.ok) {
+            alert(d.error || 'Something went wrong');
+            btn.disabled = false; btn.innerHTML = orig;
+        } else {
+            bootstrap.Modal.getInstance(document.getElementById('completionNoteModal'))?.hide();
+            location.reload();
+        }
+    } catch(e) { btn.disabled = false; btn.innerHTML = orig; alert('Network error'); }
+}
 
 async function tmAjax(action, taskId, btn, extra) {
     const orig = btn ? btn.innerHTML : null;

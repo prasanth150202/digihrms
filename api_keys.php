@@ -24,8 +24,13 @@ if (isset($_GET['delete'])) {
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['label'])) {
     $label   = trim($_POST['label'] ?? 'My App');
     $new_key = bin2hex(random_bytes(32));
+    // Re-fetch user id from DB by email to avoid stale session id after user recreation
+    $cu      = current_user();
+    $fresh   = $conn->prepare("SELECT id FROM users WHERE email = ? LIMIT 1");
+    $fresh->execute([$cu['email']]);
+    $owner_id = (int)($fresh->fetchColumn() ?: $cu['id']);
     $conn->prepare("INSERT INTO api_keys (user_id, label, api_key) VALUES (?,?,?)")
-         ->execute([current_user()['id'], $label, $new_key]);
+         ->execute([$owner_id, $label, $new_key]);
     // Do NOT redirect — fall through to show the key reveal screen
 }
 

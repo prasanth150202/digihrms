@@ -89,9 +89,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         </button>
     </form>
 
-    <div class="text-center mt-4">
-        <small class="text-muted">First time? <a href="setup.php" class="text-primary">Setup Admin Account</a></small>
-    </div>
+    
 </div>
 <script>
 function togglePwd() {
