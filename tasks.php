@@ -59,8 +59,8 @@ if ($role === 'TEAM_LEAD') {
     $my_dept_id = tl_dept_id($conn, $uid);
     $my_team    = dept_team_members($conn, $uid);
 }
-if ($role === 'SUPER_ADMIN') {
-    $my_team = $conn->query("SELECT id, name FROM users WHERE role IN ('EMPLOYEE','TEAM_LEAD') ORDER BY name")->fetchAll();
+if ($role === 'SUPER_ADMIN' || $role === 'DEPT_MANAGER') {
+    $my_team = $conn->query("SELECT id, name FROM users WHERE role IN ('EMPLOYEE','TEAM_LEAD','DEPT_MANAGER') ORDER BY name")->fetchAll();
 }
 
 // All TLs (for cross-team requests) — via employee_roles
@@ -204,12 +204,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 
     // TL approves request → assigns to team member
     if ($_POST['action'] === 'approve_request' && $is_tl) {
-        $tid = (int)$_POST['task_id'];
-        $conn->prepare("UPDATE tasks SET status='TODO', assigned_to=?, assigned_by=? WHERE id=? AND to_tl_id=?")
-             ->execute([$_POST['assigned_to'], $uid, $tid, $uid]);
+        $tid         = (int)$_POST['task_id'];
+        $assignee_id = (int)$_POST['assigned_to'];
+        $needs_appr  = !empty($_POST['needs_approval']) ? 1 : 0;
+        $conn->prepare("UPDATE tasks SET status='TODO', assigned_to=?, assigned_by=?, needs_approval=? WHERE id=? AND to_tl_id=?")
+             ->execute([$assignee_id, $uid, $needs_appr, $tid, $uid]);
         $conn->prepare("INSERT INTO task_comments (task_id,user_id,comment) VALUES (?,?,?)")
-             ->execute([$tid, $uid, 'Request approved and assigned to team member.']);
-        log_task_activity($conn, $tid, $uid, 'APPROVED', 'Cross-team request approved & assigned');
+             ->execute([$tid, $uid, 'Request approved and assigned to team member.' . ($needs_appr ? ' Requires approval.' : '')]);
+        log_task_activity($conn, $tid, $uid, 'APPROVED', 'Cross-team request approved & assigned' . ($needs_appr ? ' [requires approval]' : ''));
+        // Notify the assignee
+        if ($assignee_id && $assignee_id !== $uid) {
+            $task_info = $conn->prepare("SELECT title, due_date FROM tasks WHERE id=?");
+            $task_info->execute([$tid]);
+            $tinfo = $task_info->fetch();
+            $due_label = !empty($tinfo['due_date']) ? ' — due ' . date('d M', strtotime($tinfo['due_date'])) : '';
+            hrms_notify($conn, $assignee_id, 'task_assigned',
+                'New task assigned: ' . mb_substr($tinfo['title'] ?? '', 0, 60),
+                'Assigned by ' . ($u['name'] ?? 'your TL') . $due_label . ($needs_appr ? ' · Requires approval' : ''),
+                'task_detail.php?id=' . $tid
+            );
+        }
         if ($is_ajax) ajax_ok();
         set_flash('success', 'Request approved and task assigned.');
         header("Location: tasks.php?tab=incoming"); exit;
@@ -232,13 +246,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         $chk = $conn->prepare("SELECT assigned_to, assigned_by, status, needs_approval, title FROM tasks WHERE id=?");
         $chk->execute([$tid]);
         $t_row = $chk->fetch();
-        if ($t_row && ($t_row['assigned_to']==$uid || $t_row['assigned_by']==$uid)) {
+        if ($t_row && ($t_row['assigned_to']==$uid || $t_row['assigned_by']==$uid) && !empty($t_row['needs_approval'])) {
             // Move to REVIEW
             $conn->prepare("UPDATE tasks SET status='REVIEW', updated_at=NOW() WHERE id=?")->execute([$tid]);
-            // Create approval record
-            $conn->prepare("INSERT INTO task_approvals (task_id, submitted_by, status) VALUES (?,?,'pending')")
-                 ->execute([$tid, $uid]);
-            log_task_activity($conn, $tid, $uid, 'STATUS_CHANGED', "REVIEW — submitted for approval");
+            // Upsert approval record: update existing rework row if present, else insert fresh pending
+            $existsAppr = $conn->prepare("SELECT id FROM task_approvals WHERE task_id=? AND status IN ('pending','rework')");
+            $existsAppr->execute([$tid]);
+            if ($existsAppr->fetchColumn()) {
+                $conn->prepare("UPDATE task_approvals SET status='pending', submitted_by=?, submitted_at=NOW(), reviewed_by=NULL, reviewed_at=NULL, note=NULL WHERE task_id=? AND status IN ('pending','rework')")
+                     ->execute([$uid, $tid]);
+            } else {
+                $conn->prepare("INSERT INTO task_approvals (task_id, submitted_by, status) VALUES (?,?,'pending')")
+                     ->execute([$tid, $uid]);
+            }
+            log_task_activity($conn, $tid, $uid, 'STATUS_CHANGED', "REVIEW — resubmitted for approval");
             // Notify TL/approvers
             if ($t_row['assigned_by'] && $t_row['assigned_by'] != $uid) {
                 hrms_notify($conn, (int)$t_row['assigned_by'], 'task_approval', 'Task ready for review: '.mb_substr($t_row['title'],0,60), 'Awaiting your approval.', 'tasks.php?tab=approvals');
@@ -248,7 +269,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             if ($is_ajax) ajax_ok();
             set_flash('success', 'Task submitted for approval. Waiting for review.');
         }
-        if ($is_ajax) ajax_err('Not authorised');
+        if ($is_ajax) ajax_err('Not authorised or task does not require approval');
         header("Location: tasks.php"); exit;
     }
 
@@ -332,7 +353,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         $allowed = ['TODO','IN_PROGRESS','REVIEW','DONE','REWORK'];
         $ns = $_POST['new_status'];
         if (in_array($ns, $allowed)) {
-            $chk = $conn->prepare("SELECT assigned_to, assigned_by, status, needs_approval FROM tasks WHERE id=?");
+            $chk = $conn->prepare("SELECT assigned_to, assigned_by, status, needs_approval, to_tl_id, title FROM tasks WHERE id=?");
             $chk->execute([$tid]);
             $t_row = $chk->fetch();
             // Block direct DONE if needs_approval and not TL
@@ -355,20 +376,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                      ->execute([$tid, $uid, "Stage moved: {$t_row['status']} → {$ns}"]);
                 log_task_activity($conn, $tid, $uid, 'STATUS_CHANGED', "{$t_row['status']} → {$ns}");
 
-                // Auto-create approval record when needs_approval task moves to REVIEW
+                // Auto-upsert approval record when needs_approval task moves to REVIEW
                 if ($ns === 'REVIEW' && !empty($t_row['needs_approval'])) {
-                    $existsAppr = $conn->prepare("SELECT id FROM task_approvals WHERE task_id=? AND status='pending'");
+                    $existsAppr = $conn->prepare("SELECT id FROM task_approvals WHERE task_id=? AND status IN ('pending','rework')");
                     $existsAppr->execute([$tid]);
-                    if (!$existsAppr->fetchColumn()) {
+                    if ($existsAppr->fetchColumn()) {
+                        // Re-open the rework/pending row so TL sees it fresh
+                        $conn->prepare("UPDATE task_approvals SET status='pending', submitted_by=?, submitted_at=NOW(), reviewed_by=NULL, reviewed_at=NULL, note=NULL WHERE task_id=? AND status IN ('pending','rework')")
+                             ->execute([$uid, $tid]);
+                    } else {
                         $conn->prepare("INSERT INTO task_approvals (task_id, submitted_by, status) VALUES (?,?,'pending')")
                              ->execute([$tid, $uid]);
-                        // Notify TL (assigned_by)
-                        if ($t_row['assigned_by'] && $t_row['assigned_by'] != $uid) {
-                            $taskTitle = $conn->prepare("SELECT title FROM tasks WHERE id=?");
-                            $taskTitle->execute([$tid]);
-                            $ttl = $taskTitle->fetchColumn();
-                            hrms_notify($conn, (int)$t_row['assigned_by'], 'task_approval', 'Task ready for review: '.mb_substr($ttl,0,60), 'Awaiting your approval.', 'tasks.php?tab=approvals');
-                        }
+                    }
+                    // Notify TL (assigned_by)
+                    if ($t_row['assigned_by'] && $t_row['assigned_by'] != $uid) {
+                        $taskTitle = $conn->prepare("SELECT title FROM tasks WHERE id=?");
+                        $taskTitle->execute([$tid]);
+                        $ttl = $taskTitle->fetchColumn();
+                        hrms_notify($conn, (int)$t_row['assigned_by'], 'task_approval', 'Task ready for review: '.mb_substr($ttl,0,60), 'Awaiting your approval.', 'tasks.php?tab=approvals');
+                    }
+                }
+
+                // Notify original cross-team requester when status changes (if task came from another team)
+                if (!empty($t_row['to_tl_id'])) {
+                    // The original requester is assigned_by when to_tl_id is set
+                    // Find who originally sent it: assigned_by before TL reassigned it
+                    $orig_req = $conn->prepare("SELECT user_id FROM task_activity_logs WHERE task_id=? AND action='CREATED' LIMIT 1");
+                    $orig_req->execute([$tid]);
+                    $orig_uid = (int)($orig_req->fetchColumn() ?: 0);
+                    $notify_targets = array_unique(array_filter([$orig_uid, (int)$t_row['to_tl_id']], fn($id) => $id && $id !== $uid));
+                    $status_labels = ['TODO'=>'Assigned','IN_PROGRESS'=>'In Progress','REVIEW'=>'In Review','DONE'=>'Completed','REWORK'=>'Rework Requested','BLOCKED'=>'Blocked'];
+                    $status_label = $status_labels[$ns] ?? str_replace('_', ' ', $ns);
+                    foreach ($notify_targets as $nid) {
+                        hrms_notify($conn, $nid, 'task_assigned', 'Cross-team task: ' . $status_label, mb_substr($t_row['title'],0,80) . ' — status updated to ' . $status_label, 'task_detail.php?id=' . $tid);
                     }
                 }
 
@@ -631,14 +671,15 @@ if ($is_tl) {
     $incoming = $s->fetchAll();
 }
 
-// Outgoing requests (sent by me)
+// Outgoing requests (sent by me) — show all cross-team tasks (to_tl_id set) so requester can track status
 $outgoing = [];
 if (!$hr_view) {
-    $s = $conn->prepare("SELECT t.*, u.name as tl_name, p.name as project_name
+    $s = $conn->prepare("SELECT t.*, u.name as tl_name, ua.name as assignee_name, p.name as project_name
         FROM tasks t
-        LEFT JOIN users u ON u.id=t.to_tl_id
+        LEFT JOIN users u  ON u.id=t.to_tl_id
+        LEFT JOIN users ua ON ua.id=t.assigned_to
         LEFT JOIN projects p ON p.id=t.project_id
-        WHERE t.assigned_by=? AND t.status IN ('REQUESTED','REJECTED') AND t.deleted_at IS NULL
+        WHERE t.assigned_by=? AND t.to_tl_id IS NOT NULL AND t.deleted_at IS NULL
         ORDER BY t.created_at DESC");
     $s->execute([$uid]);
     $outgoing = $s->fetchAll();
@@ -1396,10 +1437,12 @@ if (!empty($flash)): ?>
         <option value="BLOCKED">Blocked</option>
         <option value="DONE">Done</option>
     </select>
-    <?php if ($role === 'TEAM_LEAD' && $my_team): ?>
+    <?php if ($my_team): ?>
     <select id="memberFilter" class="form-select form-select-sm" style="width:auto;border-radius:8px;font-size:.82rem;">
         <option value="">All Members</option>
+        <?php if ($role === 'TEAM_LEAD'): ?>
         <option value="MY_TASKS">My Tasks Only</option>
+        <?php endif; ?>
         <?php foreach ($my_team as $m): ?>
         <option value="<?= $m['id'] ?>"><?= sanitize($m['name']) ?></option>
         <?php endforeach; ?>
@@ -1446,6 +1489,7 @@ if (!empty($flash)): ?>
 <div class="col-md-6 col-lg-4 task-item" id="task-card-<?= $t['id'] ?>"
      data-assignee-id="<?= (int)$t['assigned_to'] ?>"
      data-assigned-by="<?= (int)$t['assigned_by'] ?>"
+     data-assignee-name="<?= strtolower(htmlspecialchars($t['assignee_name'] ?? '')) ?>"
      data-priority="<?= $t['priority'] ?>"
      data-status="<?= $t['status'] ?>"
      data-title="<?= strtolower(htmlspecialchars($t['title'])) ?>"
@@ -1630,6 +1674,7 @@ if (!empty($flash)): ?>
             <tr class="task-item" id="task-card-<?= $t['id'] ?>"
                 data-assignee-id="<?= (int)$t['assigned_to'] ?>"
                 data-assigned-by="<?= (int)$t['assigned_by'] ?>"
+                data-assignee-name="<?= strtolower(htmlspecialchars($t['assignee_name'] ?? '')) ?>"
                 data-priority="<?= $t['priority'] ?>"
                 data-status="<?= $t['status'] ?>"
                 data-title="<?= strtolower(htmlspecialchars($t['title'])) ?>"
@@ -1767,6 +1812,7 @@ $kanban_cols = [
          data-status="<?= $kst ?>"
          data-assignee-id="<?= (int)$t['assigned_to'] ?>"
          data-assigned-by="<?= (int)$t['assigned_by'] ?>"
+         data-assignee-name="<?= strtolower(htmlspecialchars($t['assignee_name'] ?? '')) ?>"
          data-priority="<?= $t['priority'] ?>"
          data-title="<?= strtolower(htmlspecialchars($t['title'])) ?>"
          data-due="<?= $t['due_date'] ?? '' ?>"
@@ -1964,7 +2010,8 @@ $kanban_cols = [
             <thead>
                 <tr>
                     <th class="ps-4">Task</th>
-                    <th>Sent To</th>
+                    <th>Sent To (TL)</th>
+                    <th>Assigned To</th>
                     <th>Priority</th>
                     <th>Due Date</th>
                     <th>Status</th>
@@ -1975,14 +2022,31 @@ $kanban_cols = [
             <?php foreach ($outgoing as $t): ?>
             <tr class="out-item" data-date="<?= substr($t['created_at'],0,10) ?>">
                 <td class="ps-4">
-                    <div class="fw-semibold" style="font-size:.85rem;"><?= sanitize($t['title']) ?></div>
+                    <div class="fw-semibold" style="font-size:.85rem;">
+                        <?php if (!in_array($t['status'],['REQUESTED','REJECTED'])): ?>
+                        <a href="task_detail.php?id=<?= $t['id'] ?>" style="text-decoration:none;color:var(--text-primary);"><?= sanitize($t['title']) ?></a>
+                        <?php else: ?>
+                        <?= sanitize($t['title']) ?>
+                        <?php endif; ?>
+                    </div>
                     <?php if ($t['project_name']): ?><div style="font-size:.7rem;color:#94a3b8;"><i class="bi bi-folder me-1"></i><?= sanitize($t['project_name']) ?></div><?php endif; ?>
+                    <?php if (!empty($t['needs_approval'])): ?><div style="font-size:.68rem;color:#7c3aed;margin-top:2px;"><i class="bi bi-patch-check-fill me-1"></i>Requires approval</div><?php endif; ?>
                 </td>
                 <td>
                     <div class="d-flex align-items-center gap-2">
                         <div class="av-circle"><?= strtoupper(substr($t['tl_name']??'?',0,1)) ?></div>
                         <span style="font-size:.82rem;"><?= sanitize($t['tl_name'] ?? '—') ?></span>
                     </div>
+                </td>
+                <td>
+                    <?php if ($t['assignee_name']): ?>
+                    <div class="d-flex align-items-center gap-2">
+                        <div class="av-circle" style="background:#7c3aed;"><?= strtoupper(substr($t['assignee_name'],0,1)) ?></div>
+                        <span style="font-size:.82rem;"><?= sanitize($t['assignee_name']) ?></span>
+                    </div>
+                    <?php else: ?>
+                    <span style="font-size:.78rem;color:#94a3b8;">Pending</span>
+                    <?php endif; ?>
                 </td>
                 <td><span class="pri-badge pri-<?= $t['priority'] ?>"><?= $t['priority'] ?></span></td>
                 <td><span style="font-size:.82rem;color:#64748b;"><?= $t['due_date'] ? date('d M Y', strtotime($t['due_date'])) : '—' ?></span></td>
@@ -3142,14 +3206,25 @@ $cal_tasks_json = json_encode(array_values(array_map(function($t) {
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body px-4 py-3">
-                <label class="form-label fw-semibold" style="font-size:.82rem;">Assign To <span class="text-danger">*</span></label>
-                <select id="approve_assigned_to" class="form-select" style="border-radius:8px;">
-                    <option value="">— Select Team Member —</option>
-                    <option value="<?= $uid ?>"><?= sanitize($u['name']) ?> (Me)</option>
-                    <?php foreach ($my_team as $m): ?>
-                    <option value="<?= $m['id'] ?>"><?= sanitize($m['name']) ?></option>
-                    <?php endforeach; ?>
-                </select>
+                <div class="mb-3">
+                    <label class="form-label fw-semibold" style="font-size:.82rem;">Assign To <span class="text-danger">*</span></label>
+                    <select id="approve_assigned_to" class="form-select" style="border-radius:8px;">
+                        <option value="">— Select Team Member —</option>
+                        <option value="<?= $uid ?>"><?= sanitize($u['name']) ?> (Me)</option>
+                        <?php foreach ($my_team as $m): ?>
+                        <option value="<?= $m['id'] ?>"><?= sanitize($m['name']) ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="form-check" style="padding-left:0;">
+                    <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:10px 14px;border:1px solid var(--card-bdr);border-radius:8px;background:var(--body-bg);">
+                        <input type="checkbox" id="approve_needs_approval" value="1" style="width:18px;height:18px;flex-shrink:0;cursor:pointer;">
+                        <div>
+                            <div style="font-size:.84rem;font-weight:600;">Requires Approval</div>
+                            <div style="font-size:.72rem;color:var(--text-muted);">Assignee must submit for review before marking done</div>
+                        </div>
+                    </label>
+                </div>
             </div>
             <div class="modal-footer border-0 px-4 pb-4 pt-2 gap-2">
                 <button type="button" class="btn" data-bs-dismiss="modal" style="background:#f1f5f9;border:none;border-radius:8px;color:#475569;">Cancel</button>
@@ -3449,23 +3524,24 @@ function applyDateRange(selector, fromVal, toVal, countEl, noResEl) {
 
         let vis = 0;
         document.querySelectorAll('.task-item').forEach(el => {
-            const title = (el.dataset.title || '').toLowerCase();
-            const ep    = el.dataset.priority || '';
-            const es    = el.dataset.status   || '';
-            const ea    = el.dataset.assigneeId || '';
-            const eb    = el.dataset.assignedBy || '';
-            const dv    = dateMode === 'due' ? (el.dataset.due || '') : (el.dataset.created || '');
-            const inDate = !hasDate
-                        || ((!from || !dv || dv >= from) && (!to || !dv || dv <= to));
-            const myUid  = '<?= $uid ?>';
+            const title    = (el.dataset.title || '').toLowerCase();
+            const aName    = (el.dataset.assigneeName || '').toLowerCase();
+            const ep       = el.dataset.priority || '';
+            const es       = el.dataset.status   || '';
+            const ea       = el.dataset.assigneeId || '';
+            const eb       = el.dataset.assignedBy || '';
+            const dv       = dateMode === 'due' ? (el.dataset.due || '') : (el.dataset.created || '');
+            const inDate   = !hasDate
+                          || ((!from || !dv || dv >= from) && (!to || !dv || dv <= to));
+            const myUid    = '<?= $uid ?>';
             const memMatch = !mem
                           || (mem === 'MY_TASKS' && ea === myUid)
                           || (mem !== 'MY_TASKS' && (ea === mem || eb === mem));
-            const show  = (!q   || title.includes(q))
-                       && (!pri || ep === pri)
-                       && (!sts || es === sts)
-                       && memMatch
-                       && inDate;
+            const show     = (!q   || title.includes(q) || aName.includes(q))
+                          && (!pri || ep === pri)
+                          && (!sts || es === sts)
+                          && memMatch
+                          && inDate;
             el.style.display = show ? '' : 'none';
             if (show) vis++;
         });
@@ -3631,6 +3707,8 @@ function sortTable(col) {
 // ─────────────────────────────────────────────────────────
 function openApprove(id) {
     document.getElementById('approve_task_id').value = id;
+    document.getElementById('approve_assigned_to').value = '';
+    document.getElementById('approve_needs_approval').checked = false;
     new bootstrap.Modal(document.getElementById('approveModal')).show();
 }
 function openReject(id) {
@@ -3786,12 +3864,14 @@ async function submitCreateTask(btn) {
 async function submitApproveRequest(btn) {
     const taskId = document.getElementById('approve_task_id').value;
     const assignedTo = document.getElementById('approve_assigned_to').value;
+    const needsApproval = document.getElementById('approve_needs_approval').checked ? '1' : '0';
     if (!assignedTo) { alert('Please select a team member'); return; }
     const orig = btn.innerHTML;
     btn.disabled=true; btn.innerHTML='<span class="hc-spinner"></span> Approving…';
     const fd = new FormData();
     fd.append('_ajax','1'); fd.append('action','approve_request');
     fd.append('task_id',taskId); fd.append('assigned_to',assignedTo);
+    fd.append('needs_approval', needsApproval);
     try {
         const r = await fetch('tasks.php',{method:'POST',body:fd,credentials:'same-origin'});
         const d = await r.json();

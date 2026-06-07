@@ -96,6 +96,49 @@ if (!has_role('SUPER_ADMIN', 'HR_ADMIN', 'DEPT_MANAGER')) {
     ];
     $active_tasks = array_values(array_filter($my_tasks, fn($t) => $t['status'] !== 'DONE'));
 
+    // ── TL: all projects with team task counts ────────────
+    $tl_projects = [];
+    if ($role === 'TEAM_LEAD') {
+        $tl_dept = null;
+        $dq = $conn->prepare("
+            SELECT er.dept_id FROM employee_roles er
+            JOIN employees e ON e.id = er.employee_id
+            JOIN users u2 ON u2.email = e.email
+            WHERE u2.id = ? AND er.is_team_lead = 1 LIMIT 1
+        ");
+        $dq->execute([$uid]);
+        $tl_dept = $dq->fetchColumn() ?: null;
+
+        if ($tl_dept) {
+            $pq = $conn->prepare("
+                SELECT p.id, p.name, p.status,
+                       COUNT(DISTINCT t.id)                                              AS task_count,
+                       SUM(CASE WHEN t.status='TODO'        THEN 1 ELSE 0 END)          AS todo_count,
+                       SUM(CASE WHEN t.status='IN_PROGRESS' THEN 1 ELSE 0 END)          AS inprogress_count,
+                       SUM(CASE WHEN t.status='REVIEW'      THEN 1 ELSE 0 END)          AS review_count,
+                       SUM(CASE WHEN t.status='DONE'        THEN 1 ELSE 0 END)          AS done_count
+                FROM projects p
+                LEFT JOIN tasks t ON t.project_id = p.id
+                    AND t.deleted_at IS NULL
+                    AND t.assigned_to IN (
+                        SELECT u2.id FROM users u2
+                        JOIN employees e ON e.email = u2.email
+                        WHERE e.dept_id = ?
+                    )
+                GROUP BY p.id
+                ORDER BY p.status DESC, p.name ASC
+            ");
+            $pq->execute([$tl_dept]);
+            $tl_projects = $pq->fetchAll();
+        } else {
+            $tl_projects = $conn->query("
+                SELECT p.id, p.name, p.status,
+                       0 AS task_count, 0 AS todo_count, 0 AS inprogress_count, 0 AS review_count, 0 AS done_count
+                FROM projects p ORDER BY p.status DESC, p.name ASC
+            ")->fetchAll();
+        }
+    }
+
     // ── My leaves ─────────────────────────────────────────
     $ls = $conn->prepare("SELECT l.*, utl.name as tl_approver_name
         FROM leaves l LEFT JOIN users utl ON utl.id = l.tl_approved_by
@@ -176,6 +219,71 @@ if (!has_role('SUPER_ADMIN', 'HR_ADMIN', 'DEPT_MANAGER')) {
     </div>
     <?php endforeach; ?>
 </div>
+
+<?php if ($role === 'TEAM_LEAD' && $tl_projects): ?>
+<!-- ── TL: My Team Projects ───────────────────────────── -->
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-body p-4">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <div class="hrms-section-head mb-0"><i class="bi bi-folder2-open"></i> All Projects — Team Task Overview</div>
+            <a href="projects.php" class="btn btn-sm btn-outline-primary" style="font-size:12px;">Manage Projects</a>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;">
+        <?php foreach ($tl_projects as $proj):
+            $tc   = (int)$proj['task_count'];
+            $done = (int)$proj['done_count'];
+            $pct  = $tc > 0 ? round($done / $tc * 100) : 0;
+            $colors = ['#3b82f6','#047857','#7c3aed','#be185d','#b45309','#0369a1','#dc2626','#0891b2'];
+            $col  = $colors[abs(crc32($proj['name'])) % count($colors)];
+        ?>
+        <div style="background:var(--body-bg);border:1px solid var(--card-bdr);border-radius:10px;padding:14px 16px;">
+            <div class="d-flex align-items-center gap-2 mb-2">
+                <div style="width:32px;height:32px;border-radius:8px;background:<?= $col ?>18;color:<?= $col ?>;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:.85rem;flex-shrink:0;">
+                    <?= strtoupper(substr($proj['name'],0,1)) ?>
+                </div>
+                <div style="flex:1;min-width:0;">
+                    <div style="font-size:.85rem;font-weight:700;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="<?= sanitize($proj['name']) ?>">
+                        <?= sanitize($proj['name']) ?>
+                    </div>
+                    <span style="font-size:.62rem;font-weight:600;padding:1px 7px;border-radius:10px;<?= $proj['status']==='ACTIVE' ? 'background:#dcfce7;color:#166534;' : 'background:#f1f5f9;color:#64748b;' ?>">
+                        <?= $proj['status'] ?>
+                    </span>
+                </div>
+            </div>
+            <!-- Task count pills -->
+            <div class="d-flex gap-2 flex-wrap mb-2" style="font-size:.68rem;">
+                <span style="background:#f1f5f9;color:#64748b;padding:2px 8px;border-radius:8px;font-weight:600;">
+                    <span style="color:#475569;"><?= (int)$proj['todo_count'] ?></span> Todo
+                </span>
+                <span style="background:#eff6ff;color:#1d4ed8;padding:2px 8px;border-radius:8px;font-weight:600;">
+                    <span><?= (int)$proj['inprogress_count'] ?></span> In Progress
+                </span>
+                <span style="background:#fef9c3;color:#854d0e;padding:2px 8px;border-radius:8px;font-weight:600;">
+                    <span><?= (int)$proj['review_count'] ?></span> Review
+                </span>
+                <span style="background:#dcfce7;color:#166534;padding:2px 8px;border-radius:8px;font-weight:600;">
+                    <span><?= $done ?></span> Done
+                </span>
+            </div>
+            <!-- Progress bar -->
+            <div style="height:5px;background:var(--card-bdr);border-radius:10px;overflow:hidden;">
+                <div style="height:100%;width:<?= $pct ?>%;background:<?= $col ?>;border-radius:10px;transition:width .3s;"></div>
+            </div>
+            <div class="d-flex justify-content-between mt-1" style="font-size:.67rem;color:var(--text-muted);">
+                <span><?= $done ?>/<?= $tc ?> team tasks done</span>
+                <span style="font-weight:600;"><?= $pct ?>%</span>
+            </div>
+            <?php if ($tc > 0): ?>
+            <a href="tasks.php?project=<?= $proj['id'] ?>" style="display:block;margin-top:8px;font-size:.72rem;text-align:center;color:var(--primary);text-decoration:none;font-weight:600;padding:4px;border:1px solid var(--primary-bdr);border-radius:6px;transition:background .12s;" onmouseover="this.style.background='var(--primary-bg)'" onmouseout="this.style.background=''">
+                <i class="bi bi-list-task me-1"></i>View Team Tasks
+            </a>
+            <?php endif; ?>
+        </div>
+        <?php endforeach; ?>
+        </div>
+    </div>
+</div>
+<?php endif; ?>
 
 <div class="row g-4">
 

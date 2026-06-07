@@ -4,6 +4,14 @@ require_role('SUPER_ADMIN', 'HR_ADMIN', 'DEPT_MANAGER', 'TEAM_LEAD');
 $page      = 'projects';
 $pageTitle = 'Projects';
 
+// Ensure created_by column exists (one-time migration, safe to run repeatedly)
+try { $conn->exec("ALTER TABLE projects ADD COLUMN created_by INT NULL DEFAULT NULL"); } catch (PDOException $e) {}
+
+$u     = current_user();
+$uid   = (int)$u['id'];
+$role  = $u['role'];
+$is_tl = $role === 'TEAM_LEAD';
+$is_admin = in_array($role, ['SUPER_ADMIN', 'HR_ADMIN', 'DEPT_MANAGER']);
 
 // ── POST: add / edit / delete ─────────────────────────────────────────
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
@@ -17,6 +25,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         if (!$name) { set_flash('danger', 'Project name is required.'); header("Location: projects.php"); exit; }
 
         if ($id) {
+            // TL can only edit projects they created
+            if ($is_tl) {
+                $own = $conn->prepare("SELECT id FROM projects WHERE id=? AND created_by=?");
+                $own->execute([$id, $uid]);
+                if (!$own->fetch()) { set_flash('danger', 'You can only edit projects you created.'); header("Location: projects.php"); exit; }
+            }
             $conn->prepare("UPDATE projects SET name=?, description=?, status=? WHERE id=?")
                  ->execute([$name, $description ?: null, $status, $id]);
             set_flash('success', 'Project updated.');
@@ -24,8 +38,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $chk = $conn->prepare("SELECT id FROM projects WHERE name=?");
             $chk->execute([$name]);
             if ($chk->fetch()) { set_flash('danger', 'A project with this name already exists.'); header("Location: projects.php"); exit; }
-            $conn->prepare("INSERT INTO projects (name, description, status) VALUES (?,?,?)")
-                 ->execute([$name, $description ?: null, $status]);
+            $conn->prepare("INSERT INTO projects (name, description, status, created_by) VALUES (?,?,?,?)")
+                 ->execute([$name, $description ?: null, $status, $uid]);
             set_flash('success', 'Project created.');
         }
         header("Location: projects.php"); exit;
@@ -33,7 +47,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 
     if ($_POST['action'] === 'delete') {
         $id = (int)($_POST['id'] ?? 0);
-        // check tasks linked
+        // TL can only delete projects they created
+        if ($is_tl) {
+            $own = $conn->prepare("SELECT id FROM projects WHERE id=? AND created_by=?");
+            $own->execute([$id, $uid]);
+            if (!$own->fetch()) { set_flash('danger', 'You can only delete projects you created.'); header("Location: projects.php"); exit; }
+        }
         $cnt = $conn->prepare("SELECT COUNT(*) FROM tasks WHERE project_id=? AND deleted_at IS NULL");
         $cnt->execute([$id]);
         if ((int)$cnt->fetchColumn() > 0) {
@@ -48,8 +67,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 }
 
 // ── Resolve TL's department ───────────────────────────────────────────
-$u         = current_user();
-$is_tl     = $u['role'] === 'TEAM_LEAD';
 $tl_dept_id = null;
 if ($is_tl) {
     $s = $conn->prepare("
@@ -58,33 +75,47 @@ if ($is_tl) {
         JOIN users u2 ON u2.email = e.email
         WHERE u2.id = ? AND er.is_team_lead = 1 LIMIT 1
     ");
-    $s->execute([$u['id']]);
+    $s->execute([$uid]);
     $v = $s->fetchColumn();
     $tl_dept_id = $v ? (int)$v : null;
 }
 
 // ── Fetch projects with task counts ──────────────────────────────────
-// TEAM_LEAD: only projects that have at least one task assigned to their dept
-if ($is_tl && $tl_dept_id) {
-    $stmt = $conn->prepare("
-        SELECT p.*,
-               COUNT(DISTINCT t.id) AS task_count,
-               SUM(CASE WHEN t.status='DONE' THEN 1 ELSE 0 END) AS done_count
-        FROM projects p
-        JOIN tasks t ON t.project_id = p.id AND t.deleted_at IS NULL
-        JOIN users  u2 ON u2.id = t.assigned_to
-        JOIN employees e ON e.email = u2.email
-        WHERE e.dept_id = ?
-        GROUP BY p.id
-        ORDER BY p.status DESC, p.name ASC
-    ");
-    $stmt->execute([$tl_dept_id]);
+// TEAM_LEAD: all projects, but task counts scoped to their dept team
+if ($is_tl) {
+    if ($tl_dept_id) {
+        $stmt = $conn->prepare("
+            SELECT p.*,
+                   COUNT(DISTINCT t.id)                                             AS task_count,
+                   SUM(CASE WHEN t.status='DONE'        THEN 1 ELSE 0 END)         AS done_count,
+                   SUM(CASE WHEN t.status='IN_PROGRESS' THEN 1 ELSE 0 END)         AS inprogress_count,
+                   SUM(CASE WHEN t.status='TODO'        THEN 1 ELSE 0 END)         AS todo_count
+            FROM projects p
+            LEFT JOIN tasks t ON t.project_id = p.id
+                AND t.deleted_at IS NULL
+                AND t.assigned_to IN (
+                    SELECT u2.id FROM users u2
+                    JOIN employees e ON e.email = u2.email
+                    WHERE e.dept_id = ?
+                )
+            GROUP BY p.id
+            ORDER BY p.status DESC, p.name ASC
+        ");
+        $stmt->execute([$tl_dept_id]);
+    } else {
+        $stmt = $conn->query("
+            SELECT p.*, 0 AS task_count, 0 AS done_count, 0 AS inprogress_count, 0 AS todo_count
+            FROM projects p ORDER BY p.status DESC, p.name ASC
+        ");
+    }
     $projects = $stmt->fetchAll();
 } else {
     $projects = $conn->query("
         SELECT p.*,
-               COUNT(t.id) AS task_count,
-               SUM(CASE WHEN t.status='DONE' THEN 1 ELSE 0 END) AS done_count
+               COUNT(t.id)                                             AS task_count,
+               SUM(CASE WHEN t.status='DONE'        THEN 1 ELSE 0 END) AS done_count,
+               SUM(CASE WHEN t.status='IN_PROGRESS' THEN 1 ELSE 0 END) AS inprogress_count,
+               SUM(CASE WHEN t.status='TODO'        THEN 1 ELSE 0 END) AS todo_count
         FROM projects p
         LEFT JOIN tasks t ON t.project_id = p.id AND t.deleted_at IS NULL
         GROUP BY p.id
@@ -179,12 +210,10 @@ include 'header.php';
 
 <!-- Page header -->
 <div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-2">
-    <p class="text-muted small mb-0"><?= $is_tl ? 'Projects with tasks assigned to your team.' : 'Create and manage projects to organise tasks.' ?></p>
-    <?php if (!$is_tl): ?>
+    <p class="text-muted small mb-0"><?= $is_tl ? 'All projects — task counts show only your team\'s tasks.' : 'Create and manage projects to organise tasks.' ?></p>
     <button type="button" class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#projModal">
         <i class="bi bi-plus-lg me-1"></i>Add Project
     </button>
-    <?php endif; ?>
 </div>
 
 <!-- Stat cards — using HRMS design system -->
@@ -227,9 +256,9 @@ include 'header.php';
 
 <div class="proj-grid" id="projGrid">
 <?php foreach ($projects as $p):
-    $task_count = (int)$p['task_count'];
-    $done_count = (int)$p['done_count'];
-    $pct        = $task_count > 0 ? round(($done_count / $task_count) * 100) : 0;
+    $task_count      = (int)$p['task_count'];
+    $done_count      = (int)$p['done_count'];
+    $pct             = $task_count > 0 ? round(($done_count / $task_count) * 100) : 0;
     $colors     = ['#3b82f6','#047857','#7c3aed','#be185d','#b45309','#0369a1','#dc2626','#0891b2'];
     $color      = $colors[abs(crc32($p['name'])) % count($colors)];
     $initial    = strtoupper(substr($p['name'], 0, 1));
@@ -263,26 +292,36 @@ include 'header.php';
 
         <!-- Progress -->
         <div class="proj-progress-label">
-            <span><?= $done_count ?>/<?= $task_count ?> tasks done</span>
+            <span><?= $done_count ?>/<?= $task_count ?> <?= $is_tl ? 'team ' : '' ?>tasks done</span>
             <span style="font-weight:600;color:<?= $pct >= 100 ? '#166534' : 'var(--text-muted)' ?>"><?= $pct ?>%</span>
         </div>
         <div class="proj-bar">
             <div class="proj-bar-fill" style="width:<?= $pct ?>%;background:<?= $color ?>;"></div>
         </div>
+        <?php if ($is_tl && $task_count > 0): ?>
+        <div class="d-flex gap-3 mt-2" style="font-size:.7rem;">
+            <span style="color:#94a3b8;"><span style="color:#64748b;font-weight:600;"><?= (int)$p['todo_count'] ?></span> Todo</span>
+            <span style="color:#94a3b8;"><span style="color:#3b82f6;font-weight:600;"><?= (int)$p['inprogress_count'] ?></span> In Progress</span>
+            <span style="color:#94a3b8;"><span style="color:#16a34a;font-weight:600;"><?= $done_count ?></span> Done</span>
+        </div>
+        <?php endif; ?>
     </div>
 
     <!-- Footer actions -->
     <div class="proj-card-footer">
-        <?php if (!$is_tl): ?>
+        <?php
+        $can_edit = $is_admin || ($is_tl && (int)($p['created_by'] ?? 0) === $uid);
+        ?>
+        <?php if ($can_edit): ?>
         <button type="button" class="btn btn-sm btn-outline-primary flex-fill"
             onclick="openEdit(<?= htmlspecialchars(json_encode($p), ENT_QUOTES) ?>)">
             <i class="bi bi-pencil me-1"></i>Edit
         </button>
         <?php endif; ?>
         <a href="tasks.php?project=<?= $p['id'] ?>" class="btn btn-sm btn-outline-secondary flex-fill">
-            <i class="bi bi-list-task me-1"></i>Tasks
+            <i class="bi bi-list-task me-1"></i><?= $is_tl ? 'My Team Tasks' : 'Tasks' ?>
         </a>
-        <?php if (!$is_tl): ?>
+        <?php if ($can_edit): ?>
         <button type="button" class="btn btn-sm btn-outline-danger"
             onclick="deleteProject(<?= $p['id'] ?>, '<?= addslashes(sanitize($p['name'])) ?>')">
             <i class="bi bi-trash3"></i>
