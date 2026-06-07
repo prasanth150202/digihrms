@@ -829,12 +829,28 @@ if (isset($_GET['mark_notifs_read'])) {
             </div>
         </div>
 
-        <!-- User avatar -->
-        <div class="d-flex align-items-center gap-2">
-            <div style="width:32px;height:32px;background:linear-gradient(135deg,#1e3a5f,#3b82f6);border-radius:50%;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:0.8rem;flex-shrink:0;">
-                <?= strtoupper(substr($u['name'], 0, 1)) ?>
+        <!-- User avatar + account dropdown -->
+        <div class="position-relative" id="userMenuWrap">
+            <button onclick="toggleUserMenu(event)"
+                    style="background:none;border:none;padding:0;cursor:pointer;display:flex;align-items:center;gap:8px;">
+                <div style="width:32px;height:32px;background:linear-gradient(135deg,#1e3a5f,#3b82f6);border-radius:50%;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:0.8rem;flex-shrink:0;">
+                    <?= strtoupper(substr($u['name'], 0, 1)) ?>
+                </div>
+                <span class="small fw-semibold d-none d-md-inline" style="color:var(--text-primary);"><?= sanitize($u['name']) ?></span>
+                <i class="bi bi-chevron-down d-none d-md-inline" style="font-size:.65rem;color:var(--text-muted);"></i>
+            </button>
+            <div id="userMenuDropdown" style="display:none;position:absolute;right:0;top:calc(100% + 8px);min-width:200px;background:var(--card-bg);border:1px solid var(--card-bdr);border-radius:10px;box-shadow:0 12px 32px rgba(0,0,0,.15);z-index:2001;overflow:hidden;">
+                <div style="padding:10px 14px;border-bottom:1px solid var(--card-bdr);">
+                    <div class="small fw-semibold" style="color:var(--text-primary);"><?= sanitize($u['name']) ?></div>
+                    <div style="font-size:.72rem;color:var(--text-muted);"><?= sanitize($u['email']) ?></div>
+                </div>
+                <a href="change_password.php" style="display:flex;align-items:center;gap:10px;padding:10px 14px;color:var(--text-secondary);text-decoration:none;font-size:.84rem;transition:background .12s;" onmouseover="this.style.background='var(--primary-bg)'" onmouseout="this.style.background=''">
+                    <i class="bi bi-shield-lock" style="color:var(--primary);"></i> Change Password
+                </a>
+                <a href="logout.php" style="display:flex;align-items:center;gap:10px;padding:10px 14px;color:#dc2626;text-decoration:none;font-size:.84rem;border-top:1px solid var(--card-bdr);transition:background .12s;" onmouseover="this.style.background='#fee2e2'" onmouseout="this.style.background=''">
+                    <i class="bi bi-box-arrow-left"></i> Logout
+                </a>
             </div>
-            <span class="small fw-semibold d-none d-md-inline" style="color:var(--text-primary);"><?= sanitize($u['name']) ?></span>
         </div>
     </div>
 </div>
@@ -852,6 +868,15 @@ function closeSidebar() {
     document.getElementById('sidebar-overlay').classList.remove('open');
     document.body.style.overflow = '';
 }
+function toggleUserMenu(e) {
+    e.stopPropagation();
+    var d = document.getElementById('userMenuDropdown');
+    d.style.display = d.style.display === 'none' ? 'block' : 'none';
+}
+document.addEventListener('click', function() {
+    var d = document.getElementById('userMenuDropdown');
+    if (d) d.style.display = 'none';
+});
 
 // Persist sidebar scroll position across page navigations
 document.addEventListener('DOMContentLoaded', function() {

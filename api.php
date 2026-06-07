@@ -277,4 +277,128 @@ if ($endpoint === 'leaves') {
     }
 }
 
+// ── TASK COMMENTS (DigiOps comment sync) ──────────────────────────────────────
+if ($endpoint === 'task_comments') {
+    if ($method === 'POST') {
+        if (empty($body['task_id'])) api_error("Field 'task_id' is required.");
+        if (empty($body['comment'])) api_error("Field 'comment' is required.");
+        $stmt = $conn->prepare(
+            "INSERT INTO task_comments (task_id, user_id, comment, created_at) VALUES (?,?,?,NOW())"
+        );
+        $stmt->execute([(int)$body['task_id'], $body['user_id'] ?? null, $body['comment']]);
+        api_ok(['id' => (int)$conn->lastInsertId(), 'message' => 'Comment added.']);
+    }
+    if ($method === 'GET') {
+        if (!isset($_GET['task_id'])) api_error('task_id required.');
+        $after = (int)($_GET['after_id'] ?? 0);
+        $stmt = $conn->prepare(
+            "SELECT tc.id, tc.comment, tc.created_at, u.name AS user_name
+             FROM task_comments tc LEFT JOIN users u ON u.id = tc.user_id
+             WHERE tc.task_id = ? AND tc.id > ? ORDER BY tc.id ASC"
+        );
+        $stmt->execute([(int)$_GET['task_id'], $after]);
+        api_ok($stmt->fetchAll());
+    }
+}
+
+// ── TASKS (DigiOps task sync) ─────────────────────────────────────────────────
+if ($endpoint === 'tasks') {
+    if ($method === 'GET') {
+        if ($id) {
+            $stmt = $conn->prepare("SELECT * FROM tasks WHERE id = ? AND deleted_at IS NULL");
+            $stmt->execute([$id]);
+            $task = $stmt->fetch();
+            if (!$task) api_error('Task not found.', 404);
+            api_ok($task);
+        }
+        api_error('ID required.', 400);
+    }
+    if ($method === 'POST') {
+        if (empty($body['title'])) api_error("Field 'title' is required.");
+        if (empty($body['project_id'])) api_error("Field 'project_id' is required.");
+        $priority = strtoupper($body['priority'] ?? 'MEDIUM');
+        if (!in_array($priority, ['LOW','MEDIUM','HIGH','URGENT'])) $priority = 'MEDIUM';
+        $stmt = $conn->prepare(
+            "INSERT INTO tasks (project_id, title, description, priority, status, due_date, assigned_to, needs_approval, created_at)
+             VALUES (?,?,?,?,?,?,?,?,NOW())"
+        );
+        $stmt->execute([
+            (int)$body['project_id'],
+            $body['title'],
+            $body['description'] ?? '',
+            $priority,
+            'TODO',
+            $body['due_date'] ?? null,
+            !empty($body['assigned_to']) ? (int)$body['assigned_to'] : null,
+            !empty($body['needs_approval']) ? 1 : 0,
+        ]);
+        api_ok(['id' => (int)$conn->lastInsertId(), 'message' => 'Task created.']);
+    }
+    if ($method === 'PUT') {
+        if (!$id) api_error('ID required for update.');
+        $fields = ['title', 'description', 'priority', 'status', 'due_date', 'assigned_to', 'needs_approval'];
+        $sets = []; $params = [];
+        foreach ($fields as $f) { if (array_key_exists($f, $body)) { $sets[] = "$f = ?"; $params[] = $body[$f]; } }
+        if (!$sets) api_error('No fields to update.');
+        $sets[] = 'updated_at = NOW()';
+        $params[] = $id;
+        $conn->prepare("UPDATE tasks SET " . implode(', ', $sets) . " WHERE id = ?")->execute($params);
+        api_ok(['message' => 'Task updated.']);
+    }
+}
+
+// ── PROJECTS (DigiOps brand sync) ─────────────────────────────────────────────
+if ($endpoint === 'projects') {
+    if ($method === 'GET') {
+        if ($id) {
+            $stmt = $conn->prepare("SELECT * FROM projects WHERE id = ?");
+            $stmt->execute([$id]);
+            $project = $stmt->fetch();
+            if (!$project) api_error('Project not found.', 404);
+            api_ok($project);
+        }
+        $brand_id = isset($_GET['digiops_brand_id']) ? (int)$_GET['digiops_brand_id'] : null;
+        if ($brand_id) {
+            $stmt = $conn->prepare("SELECT * FROM projects WHERE digiops_brand_id = ? LIMIT 1");
+            $stmt->execute([$brand_id]);
+            $project = $stmt->fetch();
+            if (!$project) api_error('Project not found for that brand.', 404);
+            api_ok($project);
+        }
+        $stmt = $conn->query("SELECT * FROM projects ORDER BY created_at DESC");
+        api_ok($stmt->fetchAll());
+    }
+    if ($method === 'POST') {
+        if (empty($body['name'])) api_error("Field 'name' is required.");
+        $digiops_brand_id = !empty($body['digiops_brand_id']) ? (int)$body['digiops_brand_id'] : null;
+        // Idempotent — return existing project if already linked to this brand
+        if ($digiops_brand_id) {
+            $stmt = $conn->prepare("SELECT * FROM projects WHERE digiops_brand_id = ? LIMIT 1");
+            $stmt->execute([$digiops_brand_id]);
+            $existing = $stmt->fetch();
+            if ($existing) api_ok(['id' => (int)$existing['id'], 'created' => false, 'message' => 'Project already exists.']);
+        }
+        $stmt = $conn->prepare(
+            "INSERT INTO projects (name, description, status, digiops_brand_id, created_at) VALUES (?,?,?,?,NOW())"
+        );
+        $stmt->execute([
+            $body['name'],
+            $body['description'] ?? "DigiOps brand: {$body['name']}",
+            $body['status'] ?? 'ACTIVE',
+            $digiops_brand_id,
+        ]);
+        api_ok(['id' => (int)$conn->lastInsertId(), 'created' => true, 'message' => 'Project created.']);
+    }
+    if ($method === 'PUT') {
+        if (!$id) api_error('ID required for update.');
+        $fields = ['name', 'description', 'status'];
+        $sets = []; $params = [];
+        foreach ($fields as $f) { if (array_key_exists($f, $body)) { $sets[] = "$f = ?"; $params[] = $body[$f]; } }
+        if (!$sets) api_error('No fields to update.');
+        $params[] = $id;
+        $conn->prepare("UPDATE projects SET " . implode(', ', $sets) . " WHERE id = ?")->execute($params);
+        api_ok(['message' => 'Project updated.']);
+    }
+}
+
 api_error("Unknown endpoint '$endpoint'. See /api_docs.php for available endpoints.", 404);

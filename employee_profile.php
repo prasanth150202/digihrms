@@ -164,6 +164,11 @@ include 'header.php';
             </div>
 
             <!-- Personal details (HR/Admin only) -->
+            <?php if ($page === 'my_profile'): ?>
+            <a href="change_password.php" class="btn btn-outline-secondary btn-sm mt-2 w-100">
+                <i class="bi bi-shield-lock me-1"></i>Change Password
+            </a>
+            <?php endif; ?>
             <?php if (has_role('SUPER_ADMIN','HR_ADMIN')): ?>
             <hr>
             <div class="text-start small">
