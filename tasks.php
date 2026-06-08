@@ -1487,9 +1487,7 @@ if (!empty($flash)): ?>
     <?php if ($my_team): ?>
     <select id="memberFilter" class="form-select form-select-sm" style="width:auto;border-radius:8px;font-size:.82rem;">
         <option value="">All Members</option>
-        <?php if ($role === 'TEAM_LEAD'): ?>
         <option value="MY_TASKS">My Tasks Only</option>
-        <?php endif; ?>
         <?php foreach ($my_team as $m): ?>
         <option value="<?= $m['id'] ?>"><?= sanitize($m['name']) ?></option>
         <?php endforeach; ?>
