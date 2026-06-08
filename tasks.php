@@ -1477,6 +1477,13 @@ if (!empty($flash)): ?>
         <option value="BLOCKED">Blocked</option>
         <option value="DONE">Done</option>
     </select>
+    <select id="tmProjFilter" class="form-select form-select-sm" style="width:auto;border-radius:8px;font-size:.82rem;">
+        <option value="">All Projects</option>
+        <?php foreach ($projects as $p): ?>
+        <option value="<?= $p['id'] ?>"><?= sanitize($p['name']) ?></option>
+        <?php endforeach; ?>
+        <option value="0">No Project</option>
+    </select>
     <?php if ($my_team): ?>
     <select id="memberFilter" class="form-select form-select-sm" style="width:auto;border-radius:8px;font-size:.82rem;">
         <option value="">All Members</option>
@@ -1532,6 +1539,7 @@ if (!empty($flash)): ?>
      data-assignee-name="<?= strtolower(htmlspecialchars($t['assignee_name'] ?? '')) ?>"
      data-priority="<?= $t['priority'] ?>"
      data-status="<?= $t['status'] ?>"
+     data-project="<?= (int)($t['project_id'] ?? 0) ?>"
      data-title="<?= strtolower(htmlspecialchars($t['title'])) ?>"
      data-due="<?= $t['due_date'] ?? '' ?>"
      data-created="<?= substr($t['created_at'],0,10) ?>">
@@ -1717,6 +1725,7 @@ if (!empty($flash)): ?>
                 data-assignee-name="<?= strtolower(htmlspecialchars($t['assignee_name'] ?? '')) ?>"
                 data-priority="<?= $t['priority'] ?>"
                 data-status="<?= $t['status'] ?>"
+                data-project="<?= (int)($t['project_id'] ?? 0) ?>"
                 data-title="<?= strtolower(htmlspecialchars($t['title'])) ?>"
                 data-due="<?= $t['due_date'] ?? '' ?>"
                 data-created="<?= substr($t['created_at'],0,10) ?>">
@@ -1854,6 +1863,7 @@ $kanban_cols = [
          data-assigned-by="<?= (int)$t['assigned_by'] ?>"
          data-assignee-name="<?= strtolower(htmlspecialchars($t['assignee_name'] ?? '')) ?>"
          data-priority="<?= $t['priority'] ?>"
+         data-project="<?= (int)($t['project_id'] ?? 0) ?>"
          data-title="<?= strtolower(htmlspecialchars($t['title'])) ?>"
          data-due="<?= $t['due_date'] ?? '' ?>"
          data-created="<?= substr($t['created_at'],0,10) ?>"
@@ -3560,6 +3570,7 @@ function applyDateRange(selector, fromVal, toVal, countEl, noResEl) {
     const search    = document.getElementById('tmSearch');
     const priSel    = document.getElementById('tmPriFilter');
     const stsSel    = document.getElementById('tmStsFilter');
+    const projSel   = document.getElementById('tmProjFilter');
     const memberSel = document.getElementById('memberFilter');
     const noRes     = document.getElementById('tmNoResults');
     const dfFrom    = document.getElementById('dfFrom');
@@ -3614,6 +3625,7 @@ function applyDateRange(selector, fromVal, toVal, countEl, noResEl) {
         const q    = (search?.value || '').toLowerCase().trim();
         const pri  = priSel?.value  || '';
         const sts  = stsSel?.value  || '';
+        const proj = projSel?.value || '';
         const mem  = memberSel?.value || '';
         const from = dfFrom?.value || '';
         const to   = dfTo?.value   || '';
@@ -3628,6 +3640,7 @@ function applyDateRange(selector, fromVal, toVal, countEl, noResEl) {
             const es       = el.dataset.status   || '';
             const ea       = el.dataset.assigneeId || '';
             const eb       = el.dataset.assignedBy || '';
+            const eproj    = el.dataset.project || '0';
             const dv       = dateMode === 'due' ? (el.dataset.due || '') : (el.dataset.created || '');
             const inDate   = !hasDate
                           || ((!from || !dv || dv >= from) && (!to || !dv || dv <= to));
@@ -3635,9 +3648,11 @@ function applyDateRange(selector, fromVal, toVal, countEl, noResEl) {
             const memMatch = !mem
                           || (mem === 'MY_TASKS' && ea === myUid)
                           || (mem !== 'MY_TASKS' && (ea === mem || eb === mem));
+            const projMatch = !proj || eproj === proj;
             const show     = (!q   || title.includes(q) || aName.includes(q))
                           && (!pri || ep === pri)
                           && (!sts || es === sts)
+                          && projMatch
                           && memMatch
                           && inDate;
             el.style.display = show ? '' : 'none';
@@ -3647,7 +3662,7 @@ function applyDateRange(selector, fromVal, toVal, countEl, noResEl) {
         if (dfCount) dfCount.textContent = hasDate ? (vis + ' shown') : '';
     }
 
-    [search, priSel, stsSel, memberSel].forEach(el => {
+    [search, priSel, stsSel, projSel, memberSel].forEach(el => {
         if (el) el.addEventListener('input', applyAll);
     });
 
