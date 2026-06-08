@@ -63,7 +63,7 @@ if ($role === 'TEAM_LEAD') {
     $my_team    = dept_team_members($conn, $uid);
 }
 if ($role === 'SUPER_ADMIN' || $role === 'DEPT_MANAGER') {
-    $my_team = $conn->query("SELECT id, name FROM users WHERE role IN ('EMPLOYEE','TEAM_LEAD','DEPT_MANAGER') ORDER BY name")->fetchAll();
+    $my_team = $conn->query("SELECT id, name FROM users WHERE role IN ('EMPLOYEE','TEAM_LEAD','DEPT_MANAGER','SUPER_ADMIN') ORDER BY name")->fetchAll();
 }
 
 // All TLs (for cross-team requests) — via employee_roles
