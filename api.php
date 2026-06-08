@@ -21,14 +21,14 @@ function api_ok($data, $meta = []) {
     exit;
 }
 
-// Get API key from header
+// Get API key from header or query string (header may be stripped by some hosts)
 $headers   = getallheaders();
 $api_key   = $headers['X-Api-Key'] ?? $headers['X-API-Key'] ?? '';
 if (!$api_key) {
-    // Try Authorization: Bearer {key}
     $auth = $headers['Authorization'] ?? '';
     if (str_starts_with($auth, 'Bearer ')) $api_key = substr($auth, 7);
 }
+if (!$api_key) $api_key = $_GET['api_key'] ?? '';
 if (!$api_key) api_error('API key required. Pass X-API-Key header.', 401);
 
 $key_row = $conn->prepare("SELECT k.*, u.role FROM api_keys k JOIN users u ON k.user_id = u.id WHERE k.api_key = ? AND k.is_active = 1");
@@ -120,6 +120,25 @@ if ($endpoint === 'employees') {
         $conn->prepare("DELETE FROM employees WHERE id=?")->execute([$id]);
         api_ok(['message' => 'Employee deleted.']);
     }
+}
+
+// ── USER SEARCH (for DigiOps invite/assignment) ───────────────────────────────
+if ($endpoint === 'users_search' && $method === 'GET') {
+    $q    = trim($_GET['q'] ?? '');
+    $like = "%$q%";
+    $stmt = $conn->prepare("
+        SELECT u.id AS hrms_user_id, u.name, u.email, u.role AS hrms_role,
+               e.designation, d.name AS department
+        FROM users u
+        LEFT JOIN employees e ON e.email = u.email
+        LEFT JOIN departments d ON d.id = e.dept_id
+        WHERE u.invite_status = 'ACTIVE'
+          AND (u.name LIKE ? OR u.email LIKE ? OR e.designation LIKE ?)
+        ORDER BY u.name
+        LIMIT 20
+    ");
+    $stmt->execute([$like, $like, $like]);
+    api_ok($stmt->fetchAll());
 }
 
 // ── CANDIDATES ────────────────────────────────────────────────────────────────
