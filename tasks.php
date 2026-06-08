@@ -109,13 +109,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 
     // Employee creates a task for themselves
     if ($_POST['action'] === 'create_own_task' && !$is_tl && !$hr_view) {
-        $conn->prepare("INSERT INTO tasks (title,description,project_id,assigned_to,assigned_by,priority,due_date,estimated_hours,status) VALUES (?,?,?,?,?,?,?,?,'TODO')")
+        $needs_appr = isset($_POST['needs_approval']) ? 1 : 0;
+        // Find this employee's TL (same dept, is_team_lead=1) to set as assigned_by when approval is needed
+        $assigned_by = $uid;
+        if ($needs_appr) {
+            $tl_lookup = $conn->prepare("
+                SELECT u.id FROM users u
+                JOIN employees e ON e.email = u.email
+                JOIN employee_roles er ON er.employee_id = e.id AND er.is_team_lead = 1
+                WHERE e.dept_id = (
+                    SELECT dept_id FROM employees WHERE email = (SELECT email FROM users WHERE id = ? LIMIT 1) LIMIT 1
+                )
+                LIMIT 1
+            ");
+            $tl_lookup->execute([$uid]);
+            $tl_id = $tl_lookup->fetchColumn();
+            if ($tl_id) $assigned_by = (int)$tl_id;
+        }
+        $conn->prepare("INSERT INTO tasks (title,description,project_id,assigned_to,assigned_by,priority,due_date,estimated_hours,needs_approval,status) VALUES (?,?,?,?,?,?,?,?,?,'TODO')")
              ->execute([trim($_POST['title']), trim($_POST['description']),
-                 $_POST['project_id'] ?: null, $uid, $uid,
-                 $_POST['priority'], $_POST['due_date'] ?: null, $_POST['estimated_hours'] ?: null]);
+                 $_POST['project_id'] ?: null, $uid, $assigned_by,
+                 $_POST['priority'], $_POST['due_date'] ?: null, $_POST['estimated_hours'] ?: null,
+                 $needs_appr]);
         $new_id = $conn->lastInsertId();
-        log_task_activity($conn, $new_id, $uid, 'CREATED', "Self-assigned: ".trim($_POST['title']));
-        set_flash('success', 'Task created.');
+        log_task_activity($conn, $new_id, $uid, 'CREATED', "Self-assigned: ".trim($_POST['title']).($needs_appr ? ' [requires approval]' : ''));
+        // Notify TL if approval is required
+        if ($needs_appr && $assigned_by !== $uid) {
+            hrms_notify($conn, $assigned_by, 'task_assigned',
+                'Task pending your approval: ' . mb_substr(trim($_POST['title']), 0, 60),
+                ($u['name'] ?? 'An employee') . ' created a task that requires your approval.',
+                'tasks.php?tab=approvals'
+            );
+        }
+        set_flash('success', 'Task created.' . ($needs_appr ? ' Your TL will be notified to approve.' : ''));
         header("Location: tasks.php"); exit;
     }
 
@@ -3207,6 +3233,15 @@ $cal_tasks_json = json_encode(array_values(array_map(function($t) {
                     <div class="col-md-6">
                         <label class="form-label fw-semibold" style="font-size:.82rem;">Est. Hours</label>
                         <input type="number" name="estimated_hours" class="form-control" step="0.5" min="0.5" placeholder="e.g. 4" style="border-radius:8px;">
+                    </div>
+                    <div class="col-12">
+                        <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:10px 14px;border:1.5px solid #e2e8f0;border-radius:8px;background:#f8fafc;transition:border-color .15s;" id="ownApprovalLabel">
+                            <input type="checkbox" name="needs_approval" value="1" id="ownNeedsApproval" style="width:18px;height:18px;flex-shrink:0;cursor:pointer;" onchange="document.getElementById('ownApprovalLabel').style.borderColor=this.checked?'#7c3aed':'#e2e8f0';">
+                            <div>
+                                <div style="font-size:.84rem;font-weight:600;"><i class="bi bi-patch-check-fill text-primary me-1"></i>Require Approval</div>
+                                <div style="font-size:.72rem;color:#64748b;">Ask your Team Lead to approve this task before it can be marked done.</div>
+                            </div>
+                        </label>
                     </div>
                 </div>
             </div>
