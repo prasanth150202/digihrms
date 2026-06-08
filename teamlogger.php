@@ -575,8 +575,9 @@ $att_date  = $_GET['date'] ?? date('Y-m-d');
 $view      = $_GET['view'] ?? 'cards'; // 'cards' or 'table'
 
 // ── POST HANDLERS ─────────────────────────────────────────
-$invite_link = null;
-$invite_name = null;
+$invite_link = $_SESSION['tl_invite_link'] ?? null;
+$invite_name = $_SESSION['tl_invite_name'] ?? null;
+if ($invite_link) { unset($_SESSION['tl_invite_link'], $_SESSION['tl_invite_name']); }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 
@@ -589,12 +590,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         header("Location: teamlogger.php?tab=settings"); exit;
     }
 
-    if ($_POST['action'] === 'map_user') {
+    if ($_POST['action'] === 'unmap_user') {
         $hrms_uid = (int)$_POST['hrms_user_id'];
-        $tl_guid  = trim($_POST['tl_guid']);
-        $tl_code  = trim($_POST['tl_emp_code']);
-        $tl_name  = trim($_POST['tl_name'] ?? '');
-        $tl_email = trim($_POST['tl_email'] ?? '');
+        $conn->prepare("UPDATE users SET tl_guid=NULL, emp_no=NULL WHERE id=?")->execute([$hrms_uid]);
+        set_flash('success', 'User unmapped from TeamLogger.');
+        header("Location: teamlogger.php?tab=employees"); exit;
+    }
+
+    if ($_POST['action'] === 'map_user') {
+        $hrms_uid     = (int)$_POST['hrms_user_id'];
+        $tl_guid      = trim($_POST['tl_guid']);
+        $tl_code      = trim($_POST['tl_emp_code']);
+        $tl_name      = trim($_POST['tl_name'] ?? '');
+        $tl_email     = trim($_POST['tl_email'] ?? '');
+        $prev_hrms_id = (int)($_POST['prev_hrms_user_id'] ?? 0);
+        // Clear tl_guid from the previously mapped user if remapping to a different one
+        if ($prev_hrms_id && $prev_hrms_id !== $hrms_uid) {
+            $conn->prepare("UPDATE users SET tl_guid=NULL, emp_no=NULL WHERE id=?")->execute([$prev_hrms_id]);
+        }
         $conn->prepare("UPDATE users SET tl_guid=?, emp_no=? WHERE id=?")->execute([$tl_guid, $tl_code, $hrms_uid]);
 
         $s = $conn->prepare("SELECT * FROM users WHERE id=?"); $s->execute([$hrms_uid]);
@@ -604,19 +617,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $emp_name  = $mapped_user['name']  ?: $tl_name;
             $chk = $conn->prepare("SELECT id FROM employees WHERE email=? OR emp_code=? LIMIT 1");
             $chk->execute([$emp_email, $tl_code]);
-            if (!$chk->fetch()) {
+            $existing = $chk->fetch();
+            if (!$existing) {
                 $conn->prepare("INSERT INTO employees (emp_code,name,email,status) VALUES (?,?,?,'ACTIVE')")
                      ->execute([$tl_code, $emp_name, $emp_email]);
             } else {
-                $conn->prepare("UPDATE employees SET emp_code=? WHERE email=?")->execute([$tl_code, $emp_email]);
+                $conn->prepare("UPDATE employees SET emp_code=?, name=?, email=? WHERE id=?")
+                     ->execute([$tl_code, $emp_name, $emp_email, $existing['id']]);
             }
             $token   = bin2hex(random_bytes(32));
             $expires = date('Y-m-d H:i:s', strtotime('+48 hours'));
             $conn->prepare("UPDATE users SET invite_token=?, invite_expires=? WHERE id=?")->execute([$token, $expires, $hrms_uid]);
             $base = (isset($_SERVER['HTTPS']) ? 'https' : 'http') . '://' . $_SERVER['HTTP_HOST'] . dirname($_SERVER['SCRIPT_NAME']) . '/';
             $invite_link = $base . 'invite.php?token=' . $token;
-            $invite_name = $mapped_user['name'];
+            $_SESSION['tl_invite_link'] = $invite_link;
+            $_SESSION['tl_invite_name'] = $mapped_user['name'];
+            set_flash('success', 'User mapped and invitation link generated.');
         }
+        header("Location: teamlogger.php?tab=employees"); exit;
     }
 
     if ($_POST['action'] === 'create_and_map') {
@@ -638,13 +656,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
              ->execute([$name, $email, $tmp_pass, $role, $tl_code, $tl_guid, $token, $expires]);
         $chk2 = $conn->prepare("SELECT id FROM employees WHERE email=? OR emp_code=? LIMIT 1");
         $chk2->execute([$email, $tl_code]);
-        if (!$chk2->fetch()) {
+        $existing2 = $chk2->fetch();
+        if (!$existing2) {
             $conn->prepare("INSERT INTO employees (emp_code,name,email,status) VALUES (?,?,?,'ACTIVE')")
                  ->execute([$tl_code, $name, $email]);
+        } else {
+            $conn->prepare("UPDATE employees SET emp_code=?, name=?, email=? WHERE id=?")
+                 ->execute([$tl_code, $name, $email, $existing2['id']]);
         }
         $base = (isset($_SERVER['HTTPS']) ? 'https' : 'http') . '://' . $_SERVER['HTTP_HOST'] . dirname($_SERVER['SCRIPT_NAME']) . '/';
         $invite_link = $base . 'invite.php?token=' . $token;
-        $invite_name = $name;
+        $_SESSION['tl_invite_link'] = $invite_link;
+        $_SESSION['tl_invite_name'] = $name;
+        set_flash('success', 'Employee created and invitation link generated.');
+        header("Location: teamlogger.php?tab=employees"); exit;
     }
 
     // Single-day sync
@@ -808,7 +833,7 @@ include 'header.php';
             <div class="modal-body">
                 <div class="alert alert-success small py-2 mb-3">
                     <i class="bi bi-check-circle me-1"></i>
-                    <strong><?= sanitize($invite_name) ?></strong> mapped. Share this link — valid 48 hours.
+                    <strong><?= sanitize($invite_name) ?></strong> — invitation ready. Share this link (valid 48 hours).
                 </div>
                 <div class="input-group">
                     <input type="text" id="inviteLinkInput" class="form-control form-control-sm font-monospace"
@@ -1461,12 +1486,21 @@ foreach ($db_rows as $row):
                         </span>
                         <?php endif; ?>
                     </td>
-                    <td>
+                    <td class="d-flex gap-1 align-items-center flex-wrap">
                         <button class="btn btn-sm <?= $hrms_user ? 'btn-outline-secondary' : 'btn-outline-primary' ?> py-0 px-2"
-                            onclick="openMap('<?= sanitize($guid) ?>','<?= sanitize($code) ?>','<?= sanitize($name) ?>','<?= sanitize($mail) ?>')">
+                            onclick="openMap('<?= sanitize($guid) ?>','<?= sanitize($code) ?>','<?= sanitize($name) ?>','<?= sanitize($mail) ?>',<?= $hrms_user ? (int)$hrms_user['id'] : 'null' ?>)">
                             <i class="bi bi-<?= $hrms_user ? 'arrow-repeat' : 'link' ?> me-1"></i>
                             <?= $hrms_user ? 'Re-map' : 'Map / Create' ?>
                         </button>
+                        <?php if ($hrms_user): ?>
+                        <form method="POST" class="d-inline" onsubmit="return confirm('Remove TeamLogger mapping for <?= sanitize(addslashes($hrms_user['name'])) ?>?')">
+                            <input type="hidden" name="action" value="unmap_user">
+                            <input type="hidden" name="hrms_user_id" value="<?= (int)$hrms_user['id'] ?>">
+                            <button type="submit" class="btn btn-sm btn-outline-danger py-0 px-2">
+                                <i class="bi bi-x-circle me-1"></i>Unmap
+                            </button>
+                        </form>
+                        <?php endif; ?>
                     </td>
                 </tr>
                 <?php endforeach; ?>
@@ -1654,6 +1688,7 @@ if (isset($_GET['debug']) && $api_key) {
                         <input type="hidden" name="tl_emp_code" id="me_tl_code">
                         <input type="hidden" name="tl_name" id="me_tl_name">
                         <input type="hidden" name="tl_email" id="me_tl_email">
+                        <input type="hidden" name="prev_hrms_user_id" id="me_prev_hrms_id">
                         <div class="row g-2 mb-3">
                             <div class="col-md-5">
                                 <label class="form-label small fw-semibold">Filter by Role</label>
@@ -1778,15 +1813,24 @@ function copyLink() {
 <?php endif; ?>
 
 // ── Map modal ────────────────────────────────────────────
-function openMap(guid, code, name, email) {
+function openMap(guid, code, name, email, currentHrmsId) {
     ['me_tl_guid','mc_tl_guid'].forEach(id => document.getElementById(id).value = guid);
     ['me_tl_code','mc_tl_code'].forEach(id => document.getElementById(id).value = code);
     document.getElementById('me_tl_name').value  = name;
     document.getElementById('me_tl_email').value = email;
+    document.getElementById('me_prev_hrms_id').value = currentHrmsId || '';
     document.getElementById('mc_name').value  = name;
     document.getElementById('mc_email').value = email;
     document.getElementById('map_tl_name_display').textContent = name;
     document.getElementById('map_tl_code_display').textContent = code || '—';
+    // Pre-select the currently mapped HRMS user in the dropdown
+    const sel = document.getElementById('mapSelect');
+    if (currentHrmsId) {
+        const opt = Array.from(sel.options).find(o => o.value == currentHrmsId);
+        if (opt) { sel.value = currentHrmsId; opt.scrollIntoView?.({block:'nearest'}); }
+    } else {
+        sel.selectedIndex = -1;
+    }
     showMapTab('existing');
     new bootstrap.Modal(document.getElementById('mapModal')).show();
 }
