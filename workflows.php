@@ -101,6 +101,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     // ── delete ────────────────────────────────────────────────────────────
+    if ($action === 'rename') {
+        $id   = (int)($b['id'] ?? 0);
+        $name = trim($b['name'] ?? '');
+        if (!$id || !$name) { echo json_encode(['ok'=>false,'msg'=>'Missing id or name']); exit; }
+        $wf = $conn->prepare("SELECT * FROM hrms_workflow_templates WHERE id=? LIMIT 1");
+        $wf->execute([$id]);
+        $wf = $wf->fetch();
+        if (!$wf || !_can_edit($wf, $uid, $role)) { echo json_encode(['ok'=>false,'msg'=>'Access denied']); exit; }
+        $conn->prepare("UPDATE hrms_workflow_templates SET name=? WHERE id=?")->execute([$name, $id]);
+        echo json_encode(['ok'=>true,'name'=>$name]);
+        exit;
+    }
+
     if ($action === 'delete') {
         $id = (int)($b['id'] ?? 0);
         if (!$id) { echo json_encode(['ok'=>false,'msg'=>'Missing id']); exit; }
@@ -502,10 +515,13 @@ include 'header.php';
         style="cursor:pointer;" onclick="openCanvas(<?= $wf['id'] ?>, <?= htmlspecialchars(json_encode($wf['name']), ENT_QUOTES) ?>)">
         <td style="padding:12px 16px;">
             <div style="font-weight:600;font-size:13px;color:var(--text-primary);display:flex;align-items:center;gap:7px;">
-                <?= sanitize($wf['name']) ?>
+                <span id="wf-name-<?= $wf['id'] ?>"><?= sanitize($wf['name']) ?></span>
                 <?php if ($wf['has_unpublished_changes']): ?>
                 <span style="width:8px;height:8px;border-radius:50%;background:#f59e0b;flex-shrink:0;display:inline-block;" title="Unpublished changes"></span>
                 <?php endif; ?>
+                <button onclick="event.stopPropagation();renameWorkflow(<?= $wf['id'] ?>, '<?= addslashes(sanitize($wf['name'])) ?>')"
+                    style="background:none;border:none;padding:0 2px;color:var(--text-muted);cursor:pointer;opacity:.5;line-height:1;"
+                    title="Rename"><i class="bi bi-pencil" style="font-size:11px;"></i></button>
             </div>
             <?php if ($wf['description']): ?>
             <div style="font-size:11px;color:var(--text-muted);margin-top:2px;"><?= sanitize($wf['description']) ?></div>
@@ -1278,6 +1294,22 @@ async function toggleShare(id, btn) {
 }
 
 // ── Delete workflow ───────────────────────────────────────────────────────
+async function renameWorkflow(id, currentName) {
+    const newName = prompt('Rename workflow:', currentName);
+    if (!newName || newName.trim() === currentName) return;
+    const res  = await fetch('workflows.php', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'rename', id, name: newName.trim() })
+    });
+    const data = await res.json();
+    if (data.ok) {
+        const el = document.getElementById(`wf-name-${id}`);
+        if (el) el.textContent = data.name;
+        showToast('Workflow renamed.', 'success');
+    } else showToast(data.msg || 'Failed to rename.', 'error');
+}
+
 async function deleteWorkflow(id, name) {
     const ok = await showConfirm(`"${name}" will be permanently deleted.`, { title:'Delete Workflow?', okText:'Delete', okColor:'#ef4444', icon:'🗑️' });
     if (!ok) return;
