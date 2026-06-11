@@ -133,13 +133,14 @@ function fireTriggersByLogin(PDO $conn, int $userId): void {
  * Check if today is a working day (Mon–Fri, not a holiday in the holidays table)
  */
 function _isWorkingDay(PDO $conn): bool {
-    if (date('N') > 5) return false; // weekend
+    $now = new DateTime('now', new DateTimeZone('Asia/Kolkata'));
+    if ((int)$now->format('N') > 5) return false; // weekend
     try {
         $check = $conn->prepare("SELECT id FROM holidays WHERE holiday_date = ? LIMIT 1");
-        $check->execute([date('Y-m-d')]);
-        return !$check->fetch(); // false if today is a holiday
+        $check->execute([$now->format('Y-m-d')]);
+        return !$check->fetch();
     } catch (Exception $e) {
-        return true; // if table missing, treat as working day
+        return true;
     }
 }
 
@@ -150,9 +151,12 @@ function fireDueTimeTriggers(PDO $conn): array {
     $results = [];
     $rows = $conn->prepare("SELECT * FROM hrms_triggers WHERE trigger_type='time' AND is_active=1");
     $rows->execute();
-    $nowTime = date('H:i');
-    $nowDay  = date('N'); // 1=Mon, 7=Sun
-    $nowDate = date('j'); // day of month
+    // Use IST (Asia/Kolkata) so trigger times match what users set in the UI
+    $tz      = new DateTimeZone('Asia/Kolkata');
+    $now     = new DateTime('now', $tz);
+    $nowTime = $now->format('H:i');
+    $nowDay  = (int)$now->format('N'); // 1=Mon, 7=Sun
+    $nowDate = (int)$now->format('j'); // day of month
 
     foreach ($rows->fetchAll() as $trigger) {
         $conds = json_decode($trigger['conditions_json'] ?? '{}', true) ?? [];
@@ -193,7 +197,10 @@ function fireDueTimeTriggers(PDO $conn): array {
 
         // Prevent double-fire within same minute
         $lastFired = $trigger['last_fired_at'];
-        if ($lastFired && date('Y-m-d H:i', strtotime($lastFired)) === date('Y-m-d ') . $nowTime) continue;
+        if ($lastFired) {
+            $lastDt = new DateTime($lastFired, $tz);
+            if ($lastDt->format('Y-m-d H:i') === $now->format('Y-m-d H:i')) continue;
+        }
 
         $result = _executeTrigger($conn, $trigger, 0, 'cron', ['time'=>$matchedTime]);
         $results[] = ['trigger'=>$trigger['name'], 'result'=>$result];

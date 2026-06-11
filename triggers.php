@@ -132,6 +132,15 @@ include 'header.php';
 .log-item .log-status-skipped  { color: #f59e0b; font-weight: 700; font-size: 11px; }
 .log-item .log-status-failed   { color: #ef4444; font-weight: 700; font-size: 11px; }
 
+/* Event pills */
+.ev-pill {
+    padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; cursor: pointer;
+    border: 1.5px solid var(--card-bdr); background: var(--card-bg); color: var(--text-secondary);
+    transition: all .15s;
+}
+.ev-pill:hover  { border-color: var(--primary); color: var(--primary); }
+.ev-pill.active { border-color: var(--primary); background: var(--primary); color: #fff; }
+
 /* Flow toggle */
 .flow-toggle { width:36px;height:20px;border-radius:20px;background:var(--card-bdr);position:relative;cursor:pointer;transition:background .2s;flex-shrink:0;display:inline-flex; }
 .flow-toggle.on { background:#16a34a; }
@@ -311,25 +320,50 @@ include 'header.php';
         <input type="text" id="tr-desc" placeholder="Optional">
     </div>
 
-    <!-- IF conditions block -->
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-top:4px 0 2px;">
-        <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);">IF conditions</div>
-        <div style="display:flex;align-items:center;gap:6px;">
-            <span style="font-size:11px;color:var(--text-muted);font-weight:600;">Match:</span>
-            <label style="font-size:12px;cursor:pointer;display:flex;align-items:center;gap:4px;font-weight:600;color:var(--text-secondary);">
-                <input type="radio" name="cond-logic" value="AND" checked> ALL (AND)
-            </label>
-            <label style="font-size:12px;cursor:pointer;display:flex;align-items:center;gap:4px;font-weight:600;color:var(--text-secondary);">
-                <input type="radio" name="cond-logic" value="OR"> ANY (OR)
-            </label>
+    <!-- STEP 1: Event (When) -->
+    <div style="border:1.5px solid var(--primary);border-radius:10px;padding:14px 16px;background:var(--body-bg);">
+        <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--primary);margin-bottom:10px;">
+            <i class="bi bi-lightning-charge-fill me-1"></i> WHEN — Trigger Event
         </div>
+
+        <!-- Event type selector pills -->
+        <div id="event-pills" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;">
+            <button type="button" class="ev-pill" data-event="time"           onclick="selectEvent(this)">🕐 At a time</button>
+            <button type="button" class="ev-pill" data-event="login"          onclick="selectEvent(this)">🔐 On login</button>
+            <button type="button" class="ev-pill" data-event="task_created"   onclick="selectEvent(this)">📋 Task created</button>
+            <button type="button" class="ev-pill" data-event="task_assigned"  onclick="selectEvent(this)">👤 Task assigned</button>
+            <button type="button" class="ev-pill" data-event="task_completed" onclick="selectEvent(this)">✅ Task completed</button>
+            <button type="button" class="ev-pill" data-event="task_overdue"   onclick="selectEvent(this)">⏰ Task overdue</button>
+            <button type="button" class="ev-pill" data-event="task_status"    onclick="selectEvent(this)">🔄 Status changes to</button>
+        </div>
+
+        <!-- Event detail (shown after picking) -->
+        <div id="event-detail" style="display:none;"></div>
+        <div id="event-hint" style="font-size:11px;color:#ef4444;display:none;margin-top:4px;"><i class="bi bi-exclamation-circle me-1"></i>Please select a trigger event.</div>
     </div>
-    <div id="cond-list" style="display:flex;flex-direction:column;gap:6px;margin-top:6px;"></div>
-    <button type="button" onclick="addCondRow()"
-        style="margin-top:6px;background:none;border:1px dashed var(--card-bdr);border-radius:7px;padding:7px 12px;color:var(--primary);font-size:12px;font-weight:600;cursor:pointer;width:100%;">
-        + Add condition
-    </button>
-    <div id="cond-empty-hint" style="font-size:11px;color:#ef4444;display:none;margin-top:4px;">Add at least one condition with a trigger event.</div>
+
+    <!-- STEP 2: Conditions (Only if) -->
+    <div style="border:1px solid var(--card-bdr);border-radius:10px;padding:14px 16px;background:var(--body-bg);">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+            <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);">
+                <i class="bi bi-funnel me-1"></i> ONLY IF — Conditions <span style="font-weight:400;text-transform:none;letter-spacing:0;">(optional)</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:6px;">
+                <span style="font-size:11px;color:var(--text-muted);font-weight:600;">Match:</span>
+                <label style="font-size:12px;cursor:pointer;display:flex;align-items:center;gap:4px;font-weight:600;color:var(--text-secondary);">
+                    <input type="radio" name="cond-logic" value="AND" checked> ALL
+                </label>
+                <label style="font-size:12px;cursor:pointer;display:flex;align-items:center;gap:4px;font-weight:600;color:var(--text-secondary);">
+                    <input type="radio" name="cond-logic" value="OR"> ANY
+                </label>
+            </div>
+        </div>
+        <div id="cond-list" style="display:flex;flex-direction:column;gap:6px;"></div>
+        <button type="button" onclick="addCondRow()"
+            style="margin-top:6px;background:none;border:1px dashed var(--card-bdr);border-radius:7px;padding:7px 12px;color:var(--primary);font-size:12px;font-weight:600;cursor:pointer;width:100%;">
+            + Add condition
+        </button>
+    </div>
 
     <!-- THEN -->
     <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);">THEN run this workflow</div>
@@ -374,43 +408,101 @@ function filterTriggers() {
 }
 
 // ── Drawer ────────────────────────────────────────────────────────────────
-function openDrawer()  { document.getElementById('trig-drawer').classList.add('open'); }
 function closeDrawer() { document.getElementById('trig-drawer').classList.remove('open'); }
 
-// ── Condition row definitions ─────────────────────────────────────────────
-// type = 'event' means it's a trigger event (no operator/value), just a selector
-// type = 'time','select','text' = data condition with operator + value
-const COND_FIELDS = [
-    // ── Events ───────────────────────────────────────────────────────────────
-    { group:'Event', value:'event_time',           label:'🕐 Time of day',                   kind:'event_time' },
-    { group:'Event', value:'event_login',          label:'🔐 User first login today',         kind:'event_simple' },
-    { group:'Event', value:'event_task_created',   label:'📋 Task created',                  kind:'event_simple' },
-    { group:'Event', value:'event_task_assigned',  label:'👤 Task assigned',                 kind:'event_simple' },
-    { group:'Event', value:'event_task_overdue',   label:'⏰ Task overdue',                  kind:'event_simple' },
-    { group:'Event', value:'event_task_completed', label:'✅ Task completed',                kind:'event_simple' },
-    { group:'Event', value:'event_task_status',    label:'🔄 Task status changes to',        kind:'event_status' },
-    // ── Data conditions ───────────────────────────────────────────────────────
-    { group:'Condition', value:'time_of_day',      label:'⏱ Time of day is',                kind:'time' },
-    { group:'Condition', value:'task_status',      label:'📌 Task status is',               kind:'select', opts:['TODO','IN_PROGRESS','REVIEW','BLOCKED','DONE'] },
-    { group:'Condition', value:'task_priority',    label:'🚦 Task priority is',             kind:'select', opts:['LOW','MEDIUM','HIGH','URGENT'] },
-    { group:'Condition', value:'day_of_week',      label:'📅 Day of week is',               kind:'select', opts:['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'] },
-    { group:'Condition', value:'is_working_day',   label:'🏢 Is a working day',             kind:'select', opts:['yes','no'] },
-    { group:'Condition', value:'repeat_schedule',  label:'🔁 Repeat schedule is',           kind:'select', opts:['daily','weekdays','working_days','weekly','monthly'] },
-];
-
+// ── Event selection ───────────────────────────────────────────────────────
 const SEL_STYLE = 'padding:7px 8px;border:1px solid var(--card-bdr);border-radius:7px;background:var(--card-bg);color:var(--text-primary);font-size:12px;font-family:var(--font);width:100%;box-sizing:border-box;';
+
+let _selectedEvent = null; // 'time' | 'login' | 'task_created' | etc.
+
+function selectEvent(pill) {
+    document.querySelectorAll('.ev-pill').forEach(p => p.classList.remove('active'));
+    pill.classList.add('active');
+    _selectedEvent = pill.dataset.event;
+    document.getElementById('event-hint').style.display = 'none';
+    _renderEventDetail(_selectedEvent);
+}
+
+function _renderEventDetail(type) {
+    const detail = document.getElementById('event-detail');
+    detail.style.display = '';
+
+    if (type === 'time') {
+        detail.innerHTML = `
+        <div style="display:flex;flex-direction:column;gap:8px;">
+            <div>
+                <div style="font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:4px;">REPEAT</div>
+                <select id="ev-repeat" style="${SEL_STYLE}">
+                    <option value="daily">Every day</option>
+                    <option value="weekdays">Weekdays only (Mon–Fri)</option>
+                    <option value="working_days">Working days (excl. holidays)</option>
+                    <option value="weekly">Every week (Monday)</option>
+                    <option value="monthly">Every month (1st)</option>
+                </select>
+            </div>
+            <div>
+                <div style="font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:4px;">AT TIME(S)</div>
+                <div id="ev-times" style="display:flex;flex-direction:column;gap:5px;"></div>
+                <button type="button" onclick="_addEvTime()"
+                    style="margin-top:5px;background:none;border:1px dashed var(--card-bdr);border-radius:6px;padding:4px 10px;color:var(--primary);font-size:11px;font-weight:600;cursor:pointer;">
+                    + Add time slot
+                </button>
+            </div>
+        </div>`;
+        _addEvTime();
+    } else if (type === 'task_status') {
+        detail.innerHTML = `
+        <div>
+            <div style="font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:4px;">WHEN STATUS CHANGES TO</div>
+            <select id="ev-status" style="${SEL_STYLE}">
+                <option value="TODO">TODO</option>
+                <option value="IN_PROGRESS">IN PROGRESS</option>
+                <option value="REVIEW">REVIEW</option>
+                <option value="BLOCKED">BLOCKED</option>
+                <option value="DONE">DONE</option>
+            </select>
+        </div>`;
+    } else {
+        // simple events — nothing extra needed
+        const labels = {
+            login: 'Fires once per day the first time a user logs in.',
+            task_created: 'Fires whenever a new task is created.',
+            task_assigned: 'Fires whenever a task is assigned to someone.',
+            task_completed: 'Fires whenever a task is marked as completed.',
+            task_overdue: 'Fires when a task passes its due date (checked by cron).',
+        };
+        detail.innerHTML = `<div style="font-size:12px;color:var(--text-secondary);padding:4px 2px;"><i class="bi bi-info-circle me-1" style="color:var(--primary);"></i>${labels[type] || ''}</div>`;
+    }
+}
+
+function _addEvTime() {
+    const wrap = document.getElementById('ev-times');
+    const div  = document.createElement('div');
+    div.style.cssText = 'display:flex;align-items:center;gap:5px;';
+    div.innerHTML = `
+        <input type="time" class="ev-time-slot" value="09:00" style="${SEL_STYLE}flex:1;">
+        <button type="button" onclick="if(document.querySelectorAll('.ev-time-slot').length>1)this.closest('div').remove();"
+            style="background:none;border:none;color:#ef4444;font-size:16px;cursor:pointer;padding:0 3px;line-height:1;">×</button>`;
+    wrap.appendChild(div);
+}
+
+// ── Condition rows (Only if) ───────────────────────────────────────────────
+const COND_FIELDS = [
+    { value:'task_status',     label:'📌 Task status is',      kind:'select', opts:['TODO','IN_PROGRESS','REVIEW','BLOCKED','DONE'] },
+    { value:'task_priority',   label:'🚦 Task priority is',    kind:'select', opts:['LOW','MEDIUM','HIGH','URGENT'] },
+    { value:'day_of_week',     label:'📅 Day of week is',      kind:'select', opts:['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'] },
+    { value:'is_working_day',  label:'🏢 Is a working day',    kind:'select', opts:['yes','no'] },
+    { value:'repeat_schedule', label:'🔁 Repeat schedule is',  kind:'select', opts:['daily','weekdays','working_days','weekly','monthly'] },
+];
 
 function addCondRow() {
     const list = document.getElementById('cond-list');
     const div  = document.createElement('div');
     div.className = 'cond-row';
-    div.style.cssText = 'background:var(--body-bg);border:1px solid var(--card-bdr);border-radius:8px;padding:10px 12px;display:flex;flex-direction:column;gap:7px;position:relative;';
+    div.style.cssText = 'background:var(--card-bg);border:1px solid var(--card-bdr);border-radius:8px;padding:10px 12px;display:flex;flex-direction:column;gap:7px;';
 
-    // Group options by group
-    const groups = {};
-    COND_FIELDS.forEach(f => { (groups[f.group] = groups[f.group]||[]).push(f); });
-    const optHtml = Object.entries(groups).map(([g,fs]) =>
-        `<optgroup label="${g}">${fs.map(f=>`<option value="${f.value}" data-kind="${f.kind}" data-opts='${JSON.stringify(f.opts||[])}'>${f.label}</option>`).join('')}</optgroup>`
+    const optHtml = COND_FIELDS.map(f =>
+        `<option value="${f.value}" data-kind="${f.kind}" data-opts='${JSON.stringify(f.opts||[])}'>${f.label}</option>`
     ).join('');
 
     div.innerHTML = `
@@ -430,159 +522,88 @@ function _renderCondRowDetail(sel) {
     const row    = sel.closest('.cond-row');
     const detail = row.querySelector('.cr-detail');
     const opt    = sel.options[sel.selectedIndex];
-    const kind   = opt?.dataset.kind || 'event_simple';
+    const kind   = opt?.dataset.kind || 'select';
     const opts   = JSON.parse(opt?.dataset.opts || '[]');
 
-    if (kind === 'event_simple') {
-        detail.innerHTML = `<div style="font-size:11px;color:var(--primary);"><i class="bi bi-info-circle me-1"></i>Fires when this event occurs.</div>`;
-    }
-    else if (kind === 'event_time') {
-        detail.innerHTML = `
-        <div style="display:flex;flex-direction:column;gap:6px;">
-            <select class="cr-repeat" style="${SEL_STYLE}">
-                <option value="daily">Every day</option>
-                <option value="weekdays">Weekdays only (Mon–Fri)</option>
-                <option value="working_days">Working days (excl. holidays)</option>
-                <option value="weekly">Every week (Monday)</option>
-                <option value="monthly">Every month (1st)</option>
-            </select>
-            <div id="ts-wrap-${_rowIdx(row)}" style="display:flex;flex-direction:column;gap:5px;"></div>
-            <button type="button" onclick="_addTimeInput(this)" style="background:none;border:1px dashed var(--card-bdr);border-radius:6px;padding:4px 10px;color:var(--primary);font-size:11px;font-weight:600;cursor:pointer;align-self:flex-start;">+ Add time</button>
-        </div>`;
-        _addTimeInput(detail.querySelector('button'));
-    }
-    else if (kind === 'event_status') {
-        detail.innerHTML = `
-        <select class="cr-status-val" style="${SEL_STYLE}">
-            <option value="TODO">TODO</option>
-            <option value="IN_PROGRESS">IN PROGRESS</option>
-            <option value="REVIEW">REVIEW</option>
-            <option value="BLOCKED">BLOCKED</option>
-            <option value="DONE">DONE</option>
-        </select>`;
-    }
-    else if (kind === 'time') {
-        detail.innerHTML = `
-        <div style="display:flex;gap:6px;align-items:center;">
-            <select class="cr-op" style="${SEL_STYLE}max-width:64px;">
-                <option value="==">=</option><option value="!=">≠</option>
-                <option value=">">&gt;</option><option value="<">&lt;</option>
-            </select>
-            <input type="time" class="cr-val" value="09:00" style="${SEL_STYLE}flex:1;">
-        </div>`;
-    }
-    else if (kind === 'select') {
-        detail.innerHTML = `
-        <div style="display:flex;gap:6px;align-items:center;">
-            <select class="cr-op" style="${SEL_STYLE}max-width:64px;">
-                <option value="==">=</option><option value="!=">≠</option>
-            </select>
-            <select class="cr-val" style="${SEL_STYLE}flex:1;">
-                ${opts.map(o=>`<option>${o}</option>`).join('')}
-            </select>
-        </div>`;
-    }
+    detail.innerHTML = `
+    <div style="display:flex;gap:6px;align-items:center;">
+        <select class="cr-op" style="${SEL_STYLE}max-width:64px;">
+            <option value="==">=</option><option value="!=">≠</option>
+        </select>
+        <select class="cr-val" style="${SEL_STYLE}flex:1;">
+            ${opts.map(o=>`<option>${o}</option>`).join('')}
+        </select>
+    </div>`;
 }
 
-function _rowIdx(row) {
-    return [...document.querySelectorAll('.cond-row')].indexOf(row);
-}
-function _addTimeInput(btn) {
-    const wrap = btn.previousElementSibling;
-    const div  = document.createElement('div');
-    div.style.cssText = 'display:flex;align-items:center;gap:5px;';
-    div.innerHTML = `
-        <input type="time" class="cr-time-slot" value="09:00" style="${SEL_STYLE}flex:1;">
-        <button type="button" onclick="this.closest('div').remove()"
-            style="background:none;border:none;color:#ef4444;font-size:16px;cursor:pointer;padding:0 3px;line-height:1;">×</button>`;
-    wrap.appendChild(div);
-}
-
-// ── Collect conditions for save ───────────────────────────────────────────
+// ── Build payload ─────────────────────────────────────────────────────────
 function getConditions() {
-    const rows  = [...document.querySelectorAll('.cond-row')];
     const logic = document.querySelector('input[name="cond-logic"]:checked')?.value || 'AND';
     const conditions = [];
-    let triggerType = null; // derived from first event row found
 
-    rows.forEach(row => {
-        const fieldSel = row.querySelector('.cr-field');
-        if (!fieldSel) return;
-        const val  = fieldSel.value;
-        const opt  = fieldSel.options[fieldSel.selectedIndex];
-        const kind = opt?.dataset.kind || '';
+    // Event row first
+    if (_selectedEvent === 'time') {
+        const repeat = document.getElementById('ev-repeat')?.value || 'daily';
+        const times  = [...document.querySelectorAll('.ev-time-slot')].map(i=>i.value).filter(Boolean);
+        conditions.push({ field:'event_time', operator:'occurs', value:'', repeat, times });
+    } else if (_selectedEvent === 'task_status') {
+        const status = document.getElementById('ev-status')?.value || 'DONE';
+        conditions.push({ field:'event_task_status', operator:'occurs', value:status });
+    } else if (_selectedEvent) {
+        const fieldMap = {
+            login:'event_login', task_created:'event_task_created',
+            task_assigned:'event_task_assigned', task_overdue:'event_task_overdue',
+            task_completed:'event_task_completed'
+        };
+        conditions.push({ field: fieldMap[_selectedEvent] || _selectedEvent, operator:'occurs', value:'' });
+    }
 
-        if (kind === 'event_simple') {
-            // map back to trigger_type
-            const typeMap = {
-                event_login:'login', event_task_created:'task_created',
-                event_task_assigned:'task_assigned', event_task_overdue:'task_overdue',
-                event_task_completed:'task_completed'
-            };
-            if (!triggerType) triggerType = typeMap[val] || val;
-            conditions.push({ field: val, operator: 'occurs', value: '' });
-        }
-        else if (kind === 'event_time') {
-            if (!triggerType) triggerType = 'time';
-            const repeat = row.querySelector('.cr-repeat')?.value || 'daily';
-            const times  = [...row.querySelectorAll('.cr-time-slot')].map(i=>i.value).filter(Boolean);
-            conditions.push({ field: 'event_time', operator: 'occurs', value: '', repeat, times });
-        }
-        else if (kind === 'event_status') {
-            if (!triggerType) triggerType = 'task_status';
-            const status = row.querySelector('.cr-status-val')?.value || 'DONE';
-            conditions.push({ field: 'event_task_status', operator: '==', value: status });
-        }
-        else {
-            // data condition
-            const op  = row.querySelector('.cr-op')?.value  || '==';
-            const v   = row.querySelector('.cr-val')?.value || '';
-            conditions.push({ field: val, operator: op, value: v });
-        }
+    // Condition rows
+    document.querySelectorAll('.cond-row').forEach(row => {
+        const field = row.querySelector('.cr-field')?.value;
+        const op    = row.querySelector('.cr-op')?.value  || '==';
+        const val   = row.querySelector('.cr-val')?.value || '';
+        if (field) conditions.push({ field, operator:op, value:val });
     });
 
-    return { logic, conditions, trigger_type: triggerType };
-}
-
-// Derive the trigger_type from saved conditions (used for the table filter dropdown)
-function _deriveTriggerType(conds) {
-    const c = conds?.conditions ?? [];
-    for (const r of c) {
-        if (r.field === 'event_time')        return 'time';
-        if (r.field === 'event_login')       return 'login';
-        if (r.field === 'event_task_created')return 'task_created';
-        if (r.field === 'event_task_status') return 'task_status';
-        if (r.field === 'event_task_assigned')return 'task_assigned';
-        if (r.field === 'event_task_overdue') return 'task_overdue';
-        if (r.field === 'event_task_completed')return 'task_completed';
-    }
-    return '';
+    return { logic, conditions, trigger_type: _selectedEvent };
 }
 
 // ── Create trigger ────────────────────────────────────────────────────────
 async function createTrigger() {
-    const name   = document.getElementById('tr-name').value.trim();
-    const desc   = document.getElementById('tr-desc').value.trim();
-    const wf_id  = document.getElementById('tr-workflow').value;
-    const conds  = getConditions();
-    const type   = conds.trigger_type;
+    const name  = document.getElementById('tr-name').value.trim();
+    const desc  = document.getElementById('tr-desc').value.trim();
+    const wf_id = document.getElementById('tr-workflow').value;
 
-    if (!name)  { showAlert('Trigger name is required.', 'warning', 'Missing Name'); return; }
-    if (!type)  {
-        document.getElementById('cond-empty-hint').style.display = '';
-        showAlert('Add at least one event condition (e.g. "Time of day" or "Task created").', 'warning', 'No Event Selected');
+    if (!name) { showAlert('Trigger name is required.', 'warning', 'Missing Name'); return; }
+    if (!_selectedEvent) {
+        document.getElementById('event-hint').style.display = '';
+        showAlert('Please select a trigger event first.', 'warning', 'No Event Selected');
         return;
     }
-    document.getElementById('cond-empty-hint').style.display = 'none';
+    document.getElementById('event-hint').style.display = 'none';
     if (!wf_id) { showAlert('Please select a workflow to run.', 'warning', 'No Workflow Selected'); return; }
 
-    const res  = await fetch('triggers.php', {
+    const conds = getConditions();
+    const res   = await fetch('triggers.php', {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ action:'create', name, description:desc, trigger_type:type, conditions:conds, workflow_id:parseInt(wf_id) })
+        body: JSON.stringify({ action:'create', name, description:desc, trigger_type:_selectedEvent, conditions:conds, workflow_id:parseInt(wf_id) })
     });
     const data = await res.json();
     if (data.ok) { closeDrawer(); location.reload(); }
     else showAlert(data.msg, 'error', 'Could not create trigger');
+}
+
+function openDrawer() {
+    _selectedEvent = null;
+    document.getElementById('trig-drawer').classList.add('open');
+    document.querySelectorAll('.ev-pill').forEach(p => p.classList.remove('active'));
+    document.getElementById('event-detail').style.display = 'none';
+    document.getElementById('event-hint').style.display = 'none';
+    document.getElementById('cond-list').innerHTML = '';
+    document.getElementById('tr-name').value = '';
+    document.getElementById('tr-desc').value = '';
+    document.getElementById('tr-workflow').value = '';
 }
 
 // ── Toggle active ─────────────────────────────────────────────────────────
