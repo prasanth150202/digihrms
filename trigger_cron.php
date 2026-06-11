@@ -23,9 +23,11 @@ try {
 }
 
 try {
+    $ist  = new DateTimeZone('Asia/Kolkata');
+    $now  = new DateTime('now', $ist);
     $results = fireDueTimeTriggers($conn);
-    echo json_encode(['ok'=>true,'fired'=>count($results),'results'=>$results,'time'=>date('Y-m-d H:i:s')]);
+    echo json_encode(['ok'=>true,'fired'=>count($results),'results'=>$results,'ist_time'=>$now->format('Y-m-d H:i:s'),'utc_time'=>gmdate('Y-m-d H:i:s')]);
 } catch (Exception $e) {
     http_response_code(500);
-    echo json_encode(['ok'=>false,'error'=>$e->getMessage(),'time'=>date('Y-m-d H:i:s')]);
+    echo json_encode(['ok'=>false,'error'=>$e->getMessage()]);
 }
