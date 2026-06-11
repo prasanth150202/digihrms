@@ -25,7 +25,7 @@ $me_row = $me->fetch();
 // Super Admin / Dept Manager sees all; TL sees own dept only
 if (has_role('SUPER_ADMIN', 'HR_ADMIN', 'DEPT_MANAGER')) {
     $q = $conn->prepare("
-        SELECT e.id, e.name, e.email, e.phone, e.photo, e.status,
+        SELECT e.id, e.name, e.email, e.phone, e.status,
                d.name AS dept_name, r.name AS role_name,
                er.is_team_lead,
                u.id AS user_id
@@ -42,7 +42,7 @@ if (has_role('SUPER_ADMIN', 'HR_ADMIN', 'DEPT_MANAGER')) {
 } else {
     $dept_id = (int)($me_row['dept_id'] ?? 0);
     $q = $conn->prepare("
-        SELECT e.id, e.name, e.email, e.phone, e.photo, e.status,
+        SELECT e.id, e.name, e.email, e.phone, e.status,
                d.name AS dept_name, r.name AS role_name,
                er.is_team_lead,
                u.id AS user_id
@@ -142,11 +142,7 @@ foreach ($members as $m) {
 
             <!-- Avatar -->
             <div class="team-avatar">
-                <?php if ($m['photo']): ?>
-                <img src="<?= htmlspecialchars($m['photo']) ?>" alt="">
-                <?php else: ?>
                 <?= $initials ?>
-                <?php endif; ?>
             </div>
 
             <!-- Info -->
