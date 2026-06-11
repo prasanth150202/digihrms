@@ -622,6 +622,12 @@
         <i class="bi bi-folder2-open"></i> Projects
     </a>
     <?php endif; ?>
+    <a href="workflows.php" class="nav-link <?= ($page ?? '') === 'workflows' ? 'active' : '' ?>">
+        <i class="bi bi-diagram-3"></i> Workflows
+    </a>
+    <a href="triggers.php" class="nav-link <?= ($page ?? '') === 'triggers' ? 'active' : '' ?>">
+        <i class="bi bi-lightning-charge"></i> Triggers
+    </a>
     <a href="leaves.php" class="nav-link <?= ($page ?? '') === 'leaves' ? 'active' : '' ?>">
         <i class="bi bi-calendar-check"></i> Leave &amp; Permissions
     </a>

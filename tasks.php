@@ -19,6 +19,17 @@ function log_task_activity($conn, $task_id, $user_id, $action, $detail = '') {
     $conn->prepare("INSERT INTO task_activity_logs (task_id,user_id,action,detail) VALUES (?,?,?,?)")
          ->execute([$task_id, $user_id, $action, $detail]);
 }
+
+function _fire_task_trigger(string $eventType, int $taskId, int $actorId): void {
+    global $conn;
+    try {
+        $te = __DIR__ . '/trigger_engine.php';
+        if (file_exists($te)) {
+            if (!function_exists('fireTriggersByTaskEvent')) require_once $te;
+            fireTriggersByTaskEvent($conn, $eventType, $taskId, $actorId);
+        }
+    } catch (Exception $e) {}
+}
 function time_ago($dt) {
     $d = time() - strtotime($dt);
     if ($d < 60)     return 'just now';
@@ -133,6 +144,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                  $needs_appr]);
         $new_id = $conn->lastInsertId();
         log_task_activity($conn, $new_id, $uid, 'CREATED', "Self-assigned: ".trim($_POST['title']).($needs_appr ? ' [requires approval]' : ''));
+        _fire_task_trigger('task_created', (int)$new_id, $uid);
         // Notify TL if approval is required
         if ($needs_appr && $assigned_by !== $uid) {
             hrms_notify($conn, $assigned_by, 'task_assigned',
@@ -157,6 +169,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                  $needs_appr]);
         $new_id = $conn->lastInsertId();
         log_task_activity($conn, $new_id, $uid, 'CREATED', "Created & assigned: ".$title.($needs_appr ? ' [requires approval]' : ''));
+        _fire_task_trigger('task_created', (int)$new_id, $uid);
         // Notify the assignee
         $assignee_id = (int)($_POST['assigned_to'] ?? 0);
         if ($assignee_id && $assignee_id !== $uid) {
@@ -2975,8 +2988,8 @@ $cal_tasks_json = json_encode(array_values(array_map(function($t) {
 
     function showAllModal(dateStr, tasks) {
         // Simple inline list shown via alert-style bottom sheet — can be replaced by modal
-        const names = tasks.map(t => '• ' + t.title + ' [' + t.status.replace('_',' ') + ']').join('\n');
-        alert('Tasks due on ' + dateStr + ':\n\n' + names);
+        const names = tasks.map(t => `<div style="padding:4px 0;border-bottom:1px solid var(--card-bdr);">• ${t.title} <span style="font-size:11px;color:var(--text-muted);">[${t.status.replace('_',' ')}]</span></div>`).join('');
+        showAlert(`<div style="max-height:260px;overflow-y:auto;">${names}</div>`, 'info', 'Tasks due on ' + dateStr);
     }
 
     // Navigation
@@ -3500,7 +3513,7 @@ function applyDateRange(selector, fromVal, toVal, countEl, noResEl) {
                         this.value = prev;
                         applySelectColors(this);
                         setTimeout(() => this.classList.remove('error'), 2000);
-                        alert(data.error);
+                        showToast(data.error, 'error');
                     } else {
                         this.classList.add('saved');
                         applySelectColors(this);
@@ -3956,13 +3969,13 @@ async function submitCompletionNote(btn) {
         const r = await fetch('tasks.php', { method: 'POST', body: fd, credentials: 'same-origin' });
         const d = await r.json();
         if (!d.ok) {
-            alert(d.error || 'Something went wrong');
+            showToast(d.error || 'Something went wrong', 'error');
             btn.disabled = false; btn.innerHTML = orig;
         } else {
             bootstrap.Modal.getInstance(document.getElementById('completionNoteModal'))?.hide();
             location.reload();
         }
-    } catch(e) { btn.disabled = false; btn.innerHTML = orig; alert('Network error'); }
+    } catch(e) { btn.disabled = false; btn.innerHTML = orig; showToast('Network error', 'error'); }
 }
 
 async function tmAjax(action, taskId, btn, extra) {
@@ -3974,15 +3987,15 @@ async function tmAjax(action, taskId, btn, extra) {
     try {
         const r = await fetch('tasks.php', { method: 'POST', body: fd, credentials: 'same-origin' });
         const d = await r.json();
-        if (!d.ok) { alert(d.error || 'Something went wrong'); if (btn) { btn.disabled=false; btn.innerHTML=orig; } }
+        if (!d.ok) { showToast(d.error || 'Something went wrong', 'error'); if (btn) { btn.disabled=false; btn.innerHTML=orig; } }
         else location.reload();
-    } catch(e) { if (btn) { btn.disabled=false; btn.innerHTML=orig; } alert('Network error'); }
+    } catch(e) { if (btn) { btn.disabled=false; btn.innerHTML=orig; } showToast('Network error', 'error'); }
 }
 
 async function submitCreateTask(btn) {
     const form = document.getElementById('createTaskForm');
     const title = form.querySelector('[name="title"]')?.value.trim();
-    if (!title) { alert('Title is required'); return; }
+    if (!title) { showAlert('Task title is required.', 'warning', 'Missing Title'); return; }
     const orig = btn.innerHTML;
     btn.disabled = true; btn.innerHTML = '<span class="hc-spinner"></span> Creating…';
     const fd = new FormData();
@@ -3995,7 +4008,7 @@ async function submitCreateTask(btn) {
     try {
         const r = await fetch('tasks.php', { method: 'POST', body: fd, credentials: 'same-origin' });
         const d = await r.json();
-        if (!d.ok) { alert(d.error || 'Failed to create task'); btn.disabled=false; btn.innerHTML=orig; }
+        if (!d.ok) { showToast(d.error || 'Failed to create task', 'error'); btn.disabled=false; btn.innerHTML=orig; }
         else {
             bootstrap.Modal.getInstance(document.getElementById('createModal'))?.hide();
             form.querySelectorAll('input[type=text],input[type=date],input[type=number],textarea').forEach(el => el.value='');
@@ -4004,14 +4017,14 @@ async function submitCreateTask(btn) {
             btn.disabled=false; btn.innerHTML=orig;
             location.reload();
         }
-    } catch(e) { btn.disabled=false; btn.innerHTML=orig; alert('Network error'); }
+    } catch(e) { btn.disabled=false; btn.innerHTML=orig; showToast('Network error', 'error'); }
 }
 
 async function submitApproveRequest(btn) {
     const taskId = document.getElementById('approve_task_id').value;
     const assignedTo = document.getElementById('approve_assigned_to').value;
     const needsApproval = document.getElementById('approve_needs_approval').checked ? '1' : '0';
-    if (!assignedTo) { alert('Please select a team member'); return; }
+    if (!assignedTo) { showAlert('Please select a team member to assign this task to.', 'warning', 'No Assignee'); return; }
     const orig = btn.innerHTML;
     btn.disabled=true; btn.innerHTML='<span class="hc-spinner"></span> Approving…';
     const fd = new FormData();
@@ -4021,9 +4034,9 @@ async function submitApproveRequest(btn) {
     try {
         const r = await fetch('tasks.php',{method:'POST',body:fd,credentials:'same-origin'});
         const d = await r.json();
-        if (!d.ok) { alert(d.error||'Error'); btn.disabled=false; btn.innerHTML=orig; }
+        if (!d.ok) { showToast(d.error||'Error', 'error'); btn.disabled=false; btn.innerHTML=orig; }
         else { bootstrap.Modal.getInstance(document.getElementById('approveModal'))?.hide(); location.reload(); }
-    } catch(e) { btn.disabled=false; btn.innerHTML=orig; alert('Network error'); }
+    } catch(e) { btn.disabled=false; btn.innerHTML=orig; showToast('Network error', 'error'); }
 }
 
 async function submitRework(btn) {
@@ -4037,15 +4050,15 @@ async function submitRework(btn) {
     try {
         const r = await fetch('tasks.php',{method:'POST',body:fd,credentials:'same-origin'});
         const d = await r.json();
-        if (!d.ok) { alert(d.error||'Error'); btn.disabled=false; btn.innerHTML=orig; }
+        if (!d.ok) { showToast(d.error||'Error', 'error'); btn.disabled=false; btn.innerHTML=orig; }
         else { bootstrap.Modal.getInstance(document.getElementById('reworkModal'))?.hide(); location.reload(); }
-    } catch(e) { btn.disabled=false; btn.innerHTML=orig; alert('Network error'); }
+    } catch(e) { btn.disabled=false; btn.innerHTML=orig; showToast('Network error', 'error'); }
 }
 
 async function submitRejectRequest(btn) {
     const taskId = document.getElementById('reject_task_id').value;
     const reason = document.getElementById('reject_reason').value.trim();
-    if (!reason) { alert('Reason is required'); return; }
+    if (!reason) { showAlert('Please provide a reason for rejection.', 'warning', 'Reason Required'); return; }
     const orig = btn.innerHTML;
     btn.disabled=true; btn.innerHTML='<span class="hc-spinner"></span> Rejecting…';
     const fd = new FormData();
@@ -4054,9 +4067,9 @@ async function submitRejectRequest(btn) {
     try {
         const r = await fetch('tasks.php',{method:'POST',body:fd,credentials:'same-origin'});
         const d = await r.json();
-        if (!d.ok) { alert(d.error||'Error'); btn.disabled=false; btn.innerHTML=orig; }
+        if (!d.ok) { showToast(d.error||'Error', 'error'); btn.disabled=false; btn.innerHTML=orig; }
         else { bootstrap.Modal.getInstance(document.getElementById('rejectModal'))?.hide(); location.reload(); }
-    } catch(e) { btn.disabled=false; btn.innerHTML=orig; alert('Network error'); }
+    } catch(e) { btn.disabled=false; btn.innerHTML=orig; showToast('Network error', 'error'); }
 }
 </script>
 

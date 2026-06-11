@@ -15,6 +15,38 @@ function log_task_activity($conn, $task_id, $user_id, $action, $detail = '') {
          ->execute([$task_id, $user_id, $action, $detail]);
 }
 
+function _fire_task_trigger(string $eventType, int $taskId, int $actorId): void {
+    global $conn;
+    try {
+        $te = __DIR__ . '/trigger_engine.php';
+        if (file_exists($te)) {
+            if (!function_exists('fireTriggersByTaskEvent')) require_once $te;
+            if ($eventType === 'task_status') {
+                // status change — caller passes new status via $taskId slot reuse not ideal,
+                // so we read it from the task
+                $row = $conn->query("SELECT status FROM tasks WHERE id=$taskId LIMIT 1")->fetch();
+                if ($row) fireTriggersByStatusChange($conn, $taskId, $row['status'], $actorId);
+            } else {
+                fireTriggersByTaskEvent($conn, $eventType, $taskId, $actorId);
+            }
+        }
+    } catch (Exception $e) {}
+}
+
+function _fire_status_trigger(int $taskId, string $newStatus, int $actorId): void {
+    global $conn;
+    try {
+        $te = __DIR__ . '/trigger_engine.php';
+        if (file_exists($te)) {
+            if (!function_exists('fireTriggersByStatusChange')) require_once $te;
+            fireTriggersByStatusChange($conn, $taskId, $newStatus, $actorId);
+            if ($newStatus === 'DONE') {
+                fireTriggersByTaskEvent($conn, 'task_completed', $taskId, $actorId);
+            }
+        }
+    } catch (Exception $e) {}
+}
+
 $id = (int)($_GET['id'] ?? 0);
 if (!$id) { header("Location: tasks.php"); exit; }
 
@@ -114,7 +146,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $conn->prepare("INSERT INTO task_comments (task_id,user_id,comment) VALUES (?,?,?)")
                  ->execute([$id, $uid, "Stage moved: {$old_status} → " . $_POST['new_status']]);
             log_task_activity($conn, $id, $uid, 'STATUS_CHANGED', "{$old_status} → ".$_POST['new_status']);
-            
+            _fire_status_trigger($id, $_POST['new_status'], $uid);
+
             // Sync to DigiOps
             _digiops_task_sync($conn, $id, $_POST['new_status']);
         }
@@ -537,11 +570,11 @@ include 'header.php';
             fd.append('task_id', taskId);
             return fetch('task_detail.php?id='+taskId, {method:'POST', body: fd});
         }).then(()=>{ location.reload(); })
-        .catch(e=>{ alert('Error: '+e.message); btn.disabled=false; btn.innerHTML='<i class="bi bi-check-lg me-1"></i> Approve'; });
+        .catch(e=>{ showToast(e.message, 'error', 'Error'); btn.disabled=false; btn.innerHTML='<i class="bi bi-check-lg me-1"></i> Approve'; });
     }
     function tlRejectTask(taskId, btn) {
         const notes = document.getElementById('tl-reject-notes').value.trim();
-        if (!notes) { alert('Please provide feedback before sending back.'); return; }
+        if (!notes) { showAlert('Please provide feedback before sending back.', 'warning', 'Feedback Required'); return; }
         btn.disabled = true; btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Sending…';
         // 1. Push rejection to DigiOps via webhook
         fetch(DIGIOPS_WEBHOOK, {
@@ -563,7 +596,7 @@ include 'header.php';
             fd.append('notes', notes);
             return fetch('task_detail.php?id='+taskId, {method:'POST', body: fd});
         }).then(()=>{ location.reload(); })
-        .catch(e=>{ alert('Error: '+e.message); btn.disabled=false; });
+        .catch(e=>{ showToast(e.message, 'error', 'Error'); btn.disabled=false; });
     }
     </script>
     <?php endif; ?>
@@ -626,7 +659,7 @@ include 'header.php';
     }
     function brValidate() {
         if (!document.getElementById('brPersonId').value) {
-            alert('Please select a person from the list.');
+            showAlert('Please select a person from the list.', 'warning', 'Person Required');
             return false;
         }
         return true;

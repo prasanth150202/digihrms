@@ -29,6 +29,17 @@ if (!$emp) { set_flash('danger', 'Employee not found.'); header('Location: emplo
 
 $pageTitle = $emp['name'];
 
+// Published workflows for "Run Workflow" button (managers/TL only)
+$pub_workflows = [];
+if (has_role('SUPER_ADMIN','DEPT_MANAGER','TEAM_LEAD')) {
+    $pub_workflows = $conn->query("SELECT id, name FROM hrms_workflow_templates WHERE is_active=1 AND published_version>0 ORDER BY name")->fetchAll();
+}
+
+// Resolve this employee's user_id for workflow targeting
+$emp_user = $conn->prepare("SELECT id FROM users WHERE email=? LIMIT 1");
+$emp_user->execute([$emp['email']]);
+$emp_user_id = (int)($emp_user->fetchColumn() ?: 0);
+
 // Points
 $pts     = pts_summary($conn, $id);
 $recent  = pts_recent($conn, $id, 15);
@@ -215,6 +226,12 @@ include 'header.php';
             <a href="employee_form.php?id=<?= $emp['id'] ?>" class="btn btn-outline-primary btn-sm mt-3 w-100">
                 <i class="bi bi-pencil me-1"></i>Edit Profile
             </a>
+            <?php if ($pub_workflows && $emp_user_id && $page !== 'my_profile'): ?>
+            <button class="btn btn-sm mt-2 w-100" onclick="openRunWorkflow()"
+                style="background:#7c3aed;color:#fff;border:none;border-radius:8px;font-weight:600;">
+                <i class="bi bi-lightning-fill me-1"></i>Run Workflow
+            </button>
+            <?php endif; ?>
             <?php endif; ?>
         </div>
 
@@ -382,7 +399,7 @@ include 'header.php';
                 function applyCustomTaskRange() {
                     const from = document.getElementById('task-from').value;
                     const to   = document.getElementById('task-to').value;
-                    if (!from || !to) { alert('Please select both dates.'); return; }
+                    if (!from || !to) { showAlert('Please select both a start and end date.', 'warning', 'Date Required'); return; }
                     updateTaskStats('employee_profile.php?id=<?= $emp['id'] ?>&from=' + from + '&to=' + to + '&ajax=1');
                 }
                 </script>
@@ -437,5 +454,78 @@ include 'header.php';
         </div>
     </div>
 </div>
+
+<?php if ($pub_workflows && $emp_user_id && $page !== 'my_profile'): ?>
+<!-- Run Workflow Modal -->
+<div id="run-wf-backdrop" onclick="closeRunWorkflow()"
+    style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:1050;"></div>
+<div id="run-wf-modal"
+    style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
+           width:360px;background:var(--card-bg);border-radius:14px;padding:24px;z-index:1055;
+           box-shadow:0 16px 48px rgba(0,0,0,.25);">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+        <div>
+            <div style="font-size:15px;font-weight:700;color:var(--text-primary);">Run Workflow</div>
+            <div style="font-size:12px;color:var(--text-muted);">on <?= sanitize($emp['name']) ?></div>
+        </div>
+        <button onclick="closeRunWorkflow()" style="background:none;border:none;font-size:1.3rem;color:var(--text-muted);cursor:pointer;"><i class="bi bi-x"></i></button>
+    </div>
+    <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);margin-bottom:6px;">Select Workflow</div>
+    <select id="run-wf-select"
+        style="width:100%;padding:9px 12px;border:1px solid var(--card-bdr);border-radius:8px;background:var(--card-bg);color:var(--text-primary);font-size:13px;font-family:var(--font);margin-bottom:14px;">
+        <option value="">— Choose a published workflow —</option>
+        <?php foreach ($pub_workflows as $wf): ?>
+        <option value="<?= $wf['id'] ?>"><?= sanitize($wf['name']) ?></option>
+        <?php endforeach; ?>
+    </select>
+    <div style="background:var(--body-bg);border:1px solid var(--card-bdr);border-radius:8px;padding:10px 12px;font-size:12px;color:var(--text-secondary);margin-bottom:16px;">
+        <i class="bi bi-info-circle me-1" style="color:#7c3aed;"></i>
+        Dynamic assignees in the workflow (<strong>Target Person</strong>, <strong>Their TL</strong>) will resolve to
+        <strong><?= sanitize($emp['name']) ?></strong> and their Team Lead at run time.
+    </div>
+    <button onclick="runWorkflowOnPerson()" id="run-wf-btn"
+        style="width:100%;padding:10px;background:#7c3aed;color:#fff;border:none;border-radius:8px;font-weight:700;font-size:14px;cursor:pointer;">
+        <i class="bi bi-lightning-fill me-1"></i> Run Now
+    </button>
+    <div id="run-wf-result" style="margin-top:10px;font-size:12px;display:none;"></div>
+</div>
+
+<script>
+const EMP_USER_ID = <?= $emp_user_id ?>;
+
+function openRunWorkflow() {
+    document.getElementById('run-wf-backdrop').style.display = '';
+    document.getElementById('run-wf-modal').style.display = '';
+    document.getElementById('run-wf-result').style.display = 'none';
+    document.getElementById('run-wf-select').value = '';
+}
+function closeRunWorkflow() {
+    document.getElementById('run-wf-backdrop').style.display = 'none';
+    document.getElementById('run-wf-modal').style.display = 'none';
+}
+async function runWorkflowOnPerson() {
+    const wf_id = document.getElementById('run-wf-select').value;
+    if (!wf_id) { showAlert('Please select a workflow to run.', 'warning', 'No Workflow Selected'); return; }
+    const btn = document.getElementById('run-wf-btn');
+    btn.disabled = true; btn.textContent = 'Running…';
+    const res  = await fetch('triggers.php', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ action:'run_on_person', workflow_id:parseInt(wf_id), target_user_id: EMP_USER_ID })
+    });
+    const data = await res.json();
+    btn.disabled = false; btn.innerHTML = '<i class="bi bi-lightning-fill me-1"></i> Run Now';
+    const result = document.getElementById('run-wf-result');
+    result.style.display = '';
+    if (data.ok) {
+        closeRunWorkflow();
+        showToast('Workflow fired — tasks have been created.', 'success', 'Done!');
+    } else {
+        result.style.display = '';
+        result.style.color = '#ef4444';
+        result.innerHTML = '<i class="bi bi-exclamation-circle me-1"></i>' + (data.msg || 'Failed');
+    }
+}
+</script>
+<?php endif; ?>
 
 <?php include 'footer.php'; ?>

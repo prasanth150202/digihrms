@@ -528,7 +528,7 @@ async function saveInlineDept() {
         body: 'action=add_dept&dept_name=' + encodeURIComponent(name)
     });
     var data = await res.json();
-    if (data.error) { alert(data.error); return; }
+    if (data.error) { showToast(data.error, 'error'); return; }
     var sel = document.getElementById('dept-select');
     if (!sel.querySelector('option[value="'+data.id+'"]')) {
         var opt = new Option(data.name, data.id);
@@ -549,7 +549,7 @@ async function saveInlineRole() {
         body: 'action=add_role&role_name=' + encodeURIComponent(name)
     });
     var data = await res.json();
-    if (data.error) { alert(data.error); return; }
+    if (data.error) { showToast(data.error, 'error'); return; }
     var sel = document.getElementById('role-select');
     if (!sel.querySelector('option[value="'+data.id+'"]')) {
         var opt = new Option(data.name, data.id);

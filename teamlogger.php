@@ -1493,10 +1493,10 @@ foreach ($db_rows as $row):
                             <?= $hrms_user ? 'Re-map' : 'Map / Create' ?>
                         </button>
                         <?php if ($hrms_user): ?>
-                        <form method="POST" class="d-inline" onsubmit="return confirm('Remove TeamLogger mapping for <?= sanitize(addslashes($hrms_user['name'])) ?>?')">
+                        <form method="POST" class="d-inline" onsubmit="return false;" data-unmap-name="<?= sanitize($hrms_user['name']) ?>">
                             <input type="hidden" name="action" value="unmap_user">
                             <input type="hidden" name="hrms_user_id" value="<?= (int)$hrms_user['id'] ?>">
-                            <button type="submit" class="btn btn-sm btn-outline-danger py-0 px-2">
+                            <button type="button" onclick="confirmUnmap(this)" class="btn btn-sm btn-outline-danger py-0 px-2">
                                 <i class="bi bi-x-circle me-1"></i>Unmap
                             </button>
                         </form>
@@ -1883,7 +1883,7 @@ function triggerPostSyncExport() {
         syncFrom    = document.getElementById('rangeSyncFrom').value;
         syncTo      = document.getElementById('rangeSyncTo').value;
         exportAfter = document.getElementById('chkExport').checked;
-        if (!syncFrom || !syncTo) { alert('Please select a date range.'); return; }
+        if (!syncFrom || !syncTo) { showAlert('Please select both a start and end date.', 'warning', 'Date Required'); return; }
 
         dates       = buildDateList(syncFrom, syncTo);
         current     = 0;
@@ -1999,6 +1999,13 @@ function triggerPostSyncExport() {
         return list;
     }
 })();
+
+async function confirmUnmap(btn) {
+    const form = btn.closest('form');
+    const name = form.dataset.unmapName || 'this user';
+    const ok = await showConfirm(`TeamLogger mapping for <strong>${name}</strong> will be removed.`, { title:'Remove Mapping?', okText:'Remove', okColor:'#ef4444', icon:'🔗' });
+    if (ok) form.submit();
+}
 </script>
 
 <?php include 'footer.php'; ?>

@@ -86,6 +86,18 @@ function require_login() {
             $_SESSION['user']['role'] = $fresh;
         }
     }
+    // Fire login-based triggers once per day per user
+    $uid = $_SESSION['user']['id'] ?? null;
+    if ($uid && empty($_SESSION['trigger_login_checked_' . date('Y-m-d')])) {
+        $_SESSION['trigger_login_checked_' . date('Y-m-d')] = true;
+        try {
+            $te = __DIR__ . '/trigger_engine.php';
+            if (file_exists($te)) {
+                require_once $te;
+                fireTriggersByLogin($conn, (int)$uid);
+            }
+        } catch (Exception $e) {}
+    }
 }
 
 function require_role(...$roles) {
