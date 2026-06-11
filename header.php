@@ -619,6 +619,9 @@
         <?php endif; ?>
     </a>
     <?php if (has_role('SUPER_ADMIN','HR_ADMIN','DEPT_MANAGER','TEAM_LEAD')): ?>
+    <a href="my_team.php" class="nav-link <?= ($page ?? '') === 'my_team' ? 'active' : '' ?>">
+        <i class="bi bi-people-fill"></i> My Team
+    </a>
     <a href="projects.php" class="nav-link <?= ($page ?? '') === 'projects' ? 'active' : '' ?>">
         <i class="bi bi-folder2-open"></i> Projects
     </a>
@@ -656,6 +659,9 @@
     <?php endif; ?>
     <?php if (has_role('TEAM_LEAD')): ?>
     <div class="nav-section">My Team</div>
+    <a href="my_team.php" class="nav-link <?= ($page ?? '') === 'my_team' ? 'active' : '' ?>">
+        <i class="bi bi-people-fill"></i> My Team
+    </a>
     <a href="projects.php" class="nav-link <?= ($page ?? '') === 'projects' ? 'active' : '' ?>">
         <i class="bi bi-folder2-open"></i> Projects
     </a>
