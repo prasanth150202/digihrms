@@ -59,7 +59,7 @@ function dept_team_members($conn, $uid): array {
     $s = $conn->prepare("
         SELECT u.id, u.name FROM employees e
         JOIN users u ON u.email = e.email
-        WHERE e.dept_id = ? AND e.status = 'ACTIVE' AND u.id != ?
+        WHERE e.dept_id = ? AND e.status IN ('ACTIVE','PROBATION') AND u.id != ?
         ORDER BY e.name
     ");
     $s->execute([$dept_id, $uid]);

@@ -38,7 +38,7 @@ if ($is_admin_view) {
             $dept_filter      = (int)$row['dept_id'];
             $dept_filter_name = $row['name'];
             // Collect user IDs of all dept members (for leaderboard scoping)
-            $s2 = $conn->prepare("SELECT u.id FROM employees e JOIN users u ON u.email=e.email WHERE e.dept_id=? AND e.status='ACTIVE'");
+            $s2 = $conn->prepare("SELECT u.id FROM employees e JOIN users u ON u.email=e.email WHERE e.dept_id=? AND e.status IN ('ACTIVE','PROBATION')");
             $s2->execute([$dept_filter]);
             $tl_team_user_ids = array_column($s2->fetchAll(), 'id');
         }
@@ -60,7 +60,7 @@ if ($is_admin_view) {
         LEFT JOIN employee_roles er ON er.employee_id = e.id
         LEFT JOIN roles r ON r.id = er.role_id
         LEFT JOIN points_log pl ON pl.employee_id = e.id
-        WHERE e.status = 'ACTIVE' $where_dept
+        WHERE e.status IN ('ACTIVE','PROBATION') $where_dept
         GROUP BY e.id
         ORDER BY total_pts DESC
     ")->fetchAll();

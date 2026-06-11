@@ -91,7 +91,7 @@ $departments = $conn->query("
     SELECT d.*,
            COUNT(e.id) AS emp_count
     FROM   departments d
-    LEFT JOIN employees e ON e.dept_id = d.id AND e.status = 'ACTIVE'
+    LEFT JOIN employees e ON e.dept_id = d.id AND e.status IN ('ACTIVE','PROBATION')
     GROUP  BY d.id
     ORDER  BY d.name
 ")->fetchAll();
@@ -104,7 +104,7 @@ $emp_rows = $conn->query("
     FROM   employees e
     LEFT JOIN employee_roles er ON er.employee_id = e.id
     LEFT JOIN roles r ON r.id = er.role_id
-    WHERE  e.status = 'ACTIVE'
+    WHERE  e.status IN ('ACTIVE','PROBATION')
     ORDER  BY e.name
 ")->fetchAll();
 
@@ -124,7 +124,7 @@ $tl_by_dept = [];
 foreach ($tl_rows as $tl) $tl_by_dept[$tl['dept_id']] = $tl;
 
 // All active employees for dropdowns
-$all_emps = $conn->query("SELECT id, name, designation, dept_id FROM employees WHERE status='ACTIVE' ORDER BY name")->fetchAll();
+$all_emps = $conn->query("SELECT id, name, designation, dept_id FROM employees WHERE status IN ('ACTIVE','PROBATION') ORDER BY name")->fetchAll();
 
 // JSON for JS modal rendering
 $tl_data_json = json_encode(array_map(function($e) {

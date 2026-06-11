@@ -67,7 +67,7 @@ function paginate($conn, $sql, $params = []) {
 // GET /api.php?endpoint=stats
 if ($endpoint === 'stats') {
     api_ok([
-        'active_employees'      => (int)$conn->query("SELECT COUNT(*) FROM employees WHERE status='ACTIVE'")->fetchColumn(),
+        'active_employees'      => (int)$conn->query("SELECT COUNT(*) FROM employees WHERE status IN ('ACTIVE','PROBATION')")->fetchColumn(),
         'open_requests'         => (int)$conn->query("SELECT COUNT(*) FROM manpower_requests WHERE status='PENDING'")->fetchColumn(),
         'candidates_in_pipeline'=> (int)$conn->query("SELECT COUNT(*) FROM candidates WHERE status NOT IN ('HIRED','REJECTED')")->fetchColumn(),
         'interviews_scheduled'  => (int)$conn->query("SELECT COUNT(*) FROM interviews WHERE status='SCHEDULED'")->fetchColumn(),
@@ -189,7 +189,7 @@ if ($endpoint === 'candidates') {
 // ── DEPARTMENTS ───────────────────────────────────────────────────────────────
 if ($endpoint === 'departments') {
     if ($method === 'GET') {
-        $data = $conn->query("SELECT d.*, COUNT(e.id) as employee_count FROM departments d LEFT JOIN employees e ON e.dept_id=d.id AND e.status='ACTIVE' GROUP BY d.id ORDER BY d.name")->fetchAll();
+        $data = $conn->query("SELECT d.*, COUNT(e.id) as employee_count FROM departments d LEFT JOIN employees e ON e.dept_id=d.id AND e.status IN ('ACTIVE','PROBATION') GROUP BY d.id ORDER BY d.name")->fetchAll();
         api_ok($data);
     }
     if ($method === 'POST') {

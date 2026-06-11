@@ -51,7 +51,7 @@ if (has_role('SUPER_ADMIN', 'HR_ADMIN', 'DEPT_MANAGER')) {
         LEFT JOIN employee_roles er ON er.employee_id = e.id
         LEFT JOIN roles r ON r.id = er.role_id
         LEFT JOIN users u ON u.email = e.email
-        WHERE e.status = 'active' AND (er.dept_id = ? OR e.dept_id = ?)
+        WHERE e.status IN ('ACTIVE','PROBATION') AND (er.dept_id = ? OR e.dept_id = ?)
         ORDER BY e.name
     ");
     $q->execute([$dept_id, $dept_id]);

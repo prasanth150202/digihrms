@@ -5,7 +5,7 @@ $page      = 'reports';
 $pageTitle = 'Reports';
 
 // Dept headcount
-$dept_hc = $conn->query("SELECT d.name, COUNT(e.id) as cnt FROM departments d LEFT JOIN employees e ON e.dept_id=d.id AND e.status='ACTIVE' GROUP BY d.id,d.name ORDER BY cnt DESC")->fetchAll();
+$dept_hc = $conn->query("SELECT d.name, COUNT(e.id) as cnt FROM departments d LEFT JOIN employees e ON e.dept_id=d.id AND e.status IN ('ACTIVE','PROBATION') GROUP BY d.id,d.name ORDER BY cnt DESC")->fetchAll();
 
 // Candidate pipeline
 $pipeline = $conn->query("SELECT status, COUNT(*) as cnt FROM candidates GROUP BY status")->fetchAll();

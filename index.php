@@ -669,7 +669,7 @@ document.addEventListener('DOMContentLoaded', () => {
 //  HR / ADMIN / MANAGER  — original metrics dashboard
 // ══════════════════════════════════════════════════════════
 
-$total_emp  = $conn->query("SELECT COUNT(*) FROM employees WHERE status = 'ACTIVE'")->fetchColumn();
+$total_emp  = $conn->query("SELECT COUNT(*) FROM employees WHERE status IN ('ACTIVE','PROBATION')")->fetchColumn();
 $open_req   = $conn->query("SELECT COUNT(*) FROM manpower_requests WHERE status = 'PENDING'")->fetchColumn();
 $total_cand = $conn->query("SELECT COUNT(*) FROM candidates WHERE status NOT IN ('HIRED','REJECTED')")->fetchColumn();
 $interviews = $conn->query("SELECT COUNT(*) FROM interviews WHERE status = 'SCHEDULED'")->fetchColumn();
@@ -677,7 +677,7 @@ $pending_lv = $conn->query("SELECT COUNT(*) FROM leaves WHERE status = 'PENDING'
 $perm_pend  = $conn->query("SELECT COUNT(*) FROM permission_requests WHERE status = 'PENDING'")->fetchColumn();
 
 $recent_req  = $conn->query("SELECT r.*, d.name as dept_name FROM manpower_requests r LEFT JOIN departments d ON r.dept_id = d.id ORDER BY r.created_at DESC LIMIT 6")->fetchAll();
-$dept_data   = $conn->query("SELECT d.name, COUNT(e.id) as cnt FROM departments d LEFT JOIN employees e ON e.dept_id = d.id AND e.status='ACTIVE' GROUP BY d.id, d.name")->fetchAll();
+$dept_data   = $conn->query("SELECT d.name, COUNT(e.id) as cnt FROM departments d LEFT JOIN employees e ON e.dept_id = d.id AND e.status IN ('ACTIVE','PROBATION') GROUP BY d.id, d.name")->fetchAll();
 $monthly     = $conn->query("SELECT DATE_FORMAT(joining_date,'%b %Y') as month, COUNT(*) as cnt FROM employees WHERE joining_date >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH) GROUP BY DATE_FORMAT(joining_date,'%Y-%m') ORDER BY joining_date")->fetchAll();
 $recent_cand = $conn->query("SELECT * FROM candidates ORDER BY created_at DESC LIMIT 5")->fetchAll();
 
