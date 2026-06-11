@@ -12,7 +12,7 @@ firebase.initializeApp({
 
 const messaging = firebase.messaging();
 
-const BASE = self.location.pathname.includes('/hrms/') ? '/hrms/php_implementation' : '/php_implementation';
+const BASE = self.location.hostname === 'localhost' ? '/hrms/php_implementation' : '';
 
 messaging.onBackgroundMessage(function(payload) {
   const { title, body, icon, click_action } = payload.notification || {};
