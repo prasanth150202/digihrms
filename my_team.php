@@ -1,27 +1,30 @@
 <?php
 require_once 'config.php';
 require_login();
-require_role('SUPER_ADMIN', 'DEPT_MANAGER', 'TEAM_LEAD');
 
 $page      = 'my_team';
 $pageTitle = 'My Team';
 $u         = current_user();
 $uid       = $u['id'];
 
+if (!has_role('SUPER_ADMIN', 'HR_ADMIN', 'DEPT_MANAGER', 'TEAM_LEAD')) {
+    header('Location: dashboard.php'); exit;
+}
+
 // Find current user's employee record + dept
 $me = $conn->prepare("
     SELECT e.id AS emp_id, er.dept_id, er.is_team_lead
     FROM employees e
-    JOIN employee_roles er ON er.employee_id = e.id
-    JOIN users u ON u.email = e.email
+    LEFT JOIN employee_roles er ON er.employee_id = e.id
+    LEFT JOIN users u ON u.email = e.email
     WHERE u.id = ? LIMIT 1
 ");
 $me->execute([$uid]);
 $me_row = $me->fetch();
 
-// Super Admin / Dept Manager sees all active employees; TL sees own dept
+// Super Admin / Dept Manager sees all; TL sees own dept only
 if (has_role('SUPER_ADMIN', 'HR_ADMIN', 'DEPT_MANAGER')) {
-    $members = $conn->query("
+    $q = $conn->prepare("
         SELECT e.id, e.name, e.email, e.phone, e.photo, e.status,
                d.name AS dept_name, r.name AS role_name,
                er.is_team_lead,
@@ -31,11 +34,12 @@ if (has_role('SUPER_ADMIN', 'HR_ADMIN', 'DEPT_MANAGER')) {
         LEFT JOIN employee_roles er ON er.employee_id = e.id
         LEFT JOIN roles r ON r.id = er.role_id
         LEFT JOIN users u ON u.email = e.email
-        WHERE e.status = 'active'
+        WHERE e.status IN ('active','ACTIVE','PROBATION')
         ORDER BY d.name, e.name
-    ")->fetchAll();
+    ");
+    $q->execute();
+    $members = $q->fetchAll();
 } else {
-    // TL — only their department
     $dept_id = (int)($me_row['dept_id'] ?? 0);
     $q = $conn->prepare("
         SELECT e.id, e.name, e.email, e.phone, e.photo, e.status,
@@ -47,10 +51,10 @@ if (has_role('SUPER_ADMIN', 'HR_ADMIN', 'DEPT_MANAGER')) {
         LEFT JOIN employee_roles er ON er.employee_id = e.id
         LEFT JOIN roles r ON r.id = er.role_id
         LEFT JOIN users u ON u.email = e.email
-        WHERE e.status = 'active' AND er.dept_id = ?
+        WHERE e.status = 'active' AND (er.dept_id = ? OR e.dept_id = ?)
         ORDER BY e.name
     ");
-    $q->execute([$dept_id]);
+    $q->execute([$dept_id, $dept_id]);
     $members = $q->fetchAll();
 }
 
