@@ -113,9 +113,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     }
 
     if ($_POST['action'] === 'update_status' && !$hr_view && $can_act) {
-        $allowed = ['TODO','IN_PROGRESS','REVIEW','DONE'];
+        $allowed = ['TODO','IN_PROGRESS','REVIEW','DONE','REWORK'];
         if (in_array($_POST['new_status'], $allowed) && $task['status'] !== 'BLOCKED') {
             $old_status = $task['status'];
+
+            // Block DONE if task needs TL approval and actor is not TL/Admin
+            if ($_POST['new_status'] === 'DONE' && !empty($task['needs_approval']) && !$is_tl_local) {
+                set_flash('danger', 'This task requires TL approval before it can be marked Done. Use "Re-submit for Approval".');
+                header("Location: task_detail.php?id=$id"); exit;
+            }
 
             // Block DONE if the linked DigiOps task requires a fill-link asset submission
             if ($_POST['new_status'] === 'DONE') {
@@ -320,9 +326,17 @@ $comments = $conn->prepare("SELECT c.*, u.name as author FROM task_comments c JO
 $comments->execute([$id]);
 $comments = $comments->fetchAll();
 
+// Fetch latest rework note (if task is in REWORK)
+$rework_note = null;
+if ($task['status'] === 'REWORK') {
+    $rws = $conn->prepare("SELECT ta.note, u.name as reviewer_name, ta.reviewed_at FROM task_approvals ta LEFT JOIN users u ON u.id=ta.reviewed_by WHERE ta.task_id=? AND ta.status='rework' ORDER BY ta.reviewed_at DESC LIMIT 1");
+    $rws->execute([$id]);
+    $rework_note = $rws->fetch() ?: null;
+}
+
 $priority_color = ['LOW'=>'success','MEDIUM'=>'warning','HIGH'=>'danger','URGENT'=>'dark'];
 $status_color   = ['TODO'=>'secondary','IN_PROGRESS'=>'primary','REVIEW'=>'warning','DONE'=>'success','BLOCKED'=>'danger'];
-$status_flow    = ['TODO'=>'IN_PROGRESS','IN_PROGRESS'=>'REVIEW','REVIEW'=>'DONE'];
+$status_flow    = ['TODO'=>'IN_PROGRESS','IN_PROGRESS'=>'REVIEW','REVIEW'=>'DONE','REWORK'=>'IN_PROGRESS'];
 $next_status    = ($task['status'] !== 'BLOCKED') ? ($status_flow[$task['status']] ?? null) : null;
 $next_label     = ['IN_PROGRESS'=>'Start Working','REVIEW'=>'Submit for Review','DONE'=>'Mark Done'];
 
@@ -450,16 +464,59 @@ include 'header.php';
             </div>
             <?php endif; ?>
 
+            <!-- Rework banner -->
+            <?php if ($task['status'] === 'REWORK'): ?>
+            <div class="alert alert-warning mt-3 mb-0 py-2 small" style="border-radius:8px;">
+                <div class="fw-semibold mb-1"><i class="bi bi-arrow-return-left me-1"></i>Sent back for rework
+                    <?php if ($rework_note && $rework_note['reviewer_name']): ?>
+                    <span class="fw-normal text-muted"> · <?= sanitize($rework_note['reviewer_name']) ?></span>
+                    <?php endif; ?>
+                </div>
+                <?php if ($rework_note && $rework_note['note']): ?>
+                <div><?= nl2br(sanitize($rework_note['note'])) ?></div>
+                <?php endif; ?>
+            </div>
+            <?php endif; ?>
+
             <!-- Move Status -->
             <?php if (!$hr_view && $next_status && ($task['assigned_to']==$uid || in_array($role,['SUPER_ADMIN','TEAM_LEAD','DEPT_MANAGER']))): ?>
             <form method="POST" class="mt-3">
                 <input type="hidden" name="action" value="update_status">
                 <input type="hidden" name="new_status" value="<?= $next_status ?>">
                 <button class="btn btn-primary w-100 btn-sm">
-                    <i class="bi bi-arrow-right-circle me-1"></i><?= $next_label[$next_status] ?>
+                    <i class="bi bi-arrow-right-circle me-1"></i>
+                    <?= $task['status'] === 'REWORK' ? 'Resume Work' : $next_label[$next_status] ?>
                 </button>
             </form>
             <?php endif; ?>
+
+            <!-- Mark Done directly from REWORK — only when task does NOT need approval -->
+            <?php
+            $can_mark_done = !$hr_view && $task['status'] === 'REWORK'
+                && ($task['assigned_to']==$uid || in_array($role,['SUPER_ADMIN','TEAM_LEAD','DEPT_MANAGER']))
+                && empty($task['needs_approval']);
+            ?>
+            <?php if ($can_mark_done): ?>
+            <form method="POST" class="mt-2">
+                <input type="hidden" name="action" value="update_status">
+                <input type="hidden" name="new_status" value="DONE">
+                <button class="btn btn-success w-100 btn-sm">
+                    <i class="bi bi-check-circle me-1"></i>Mark as Done
+                </button>
+            </form>
+            <?php endif; ?>
+
+            <!-- Re-submit for approval from REWORK (needs_approval tasks, assignee only) -->
+            <?php if (!$hr_view && $task['status'] === 'REWORK' && $task['needs_approval'] && $task['assigned_to']==$uid && !in_array($role,['SUPER_ADMIN','TEAM_LEAD','DEPT_MANAGER'])): ?>
+            <form method="POST" class="mt-2">
+                <input type="hidden" name="action" value="update_status">
+                <input type="hidden" name="new_status" value="REVIEW">
+                <button class="btn btn-outline-primary w-100 btn-sm">
+                    <i class="bi bi-send me-1"></i>Re-submit for Approval
+                </button>
+            </form>
+            <?php endif; ?>
+
             <?php if (!$hr_view && $task['status']==='DONE'): ?>
             <div class="alert alert-success mt-3 mb-0 py-2 small text-center"><i class="bi bi-check-circle me-1"></i> Task Completed</div>
             <?php endif; ?>

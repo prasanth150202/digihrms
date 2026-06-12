@@ -1605,7 +1605,7 @@ if (!empty($flash)): ?>
                 ? 'Approver: ' . ($appr_info_c['name'] ?? $appr_info_c['role']) . ($appr_info_c['name'] ? ' (' . $appr_info_c['role'] . ')' : '')
                 : 'Approver assigned in workflow';
             ?>
-            <?php if ($t['needs_approval'] && !in_array($t['status'], ['DONE','REVIEW'])): ?>
+            <?php if ($t['needs_approval'] && !in_array($t['status'], ['DONE','REVIEW','REWORK'])): ?>
             <div style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:7px;padding:5px 9px;margin-top:4px;font-size:.72rem;color:#6d28d9;display:flex;align-items:center;gap:6px;position:relative;z-index:2;">
                 <i class="bi bi-patch-check-fill"></i>
                 <span>This task needs approval</span>
@@ -1648,21 +1648,29 @@ if (!empty($flash)): ?>
             if (!empty($t['description']) && preg_match('/Fill link:\s*(https?:\/\/\S+)/i', $t['description'], $fm_rw_c)) {
                 $fill_url_rw_c = $fm_rw_c[1];
             }
+            $is_my_rework = ($t['assigned_to']==$uid || $t['assigned_by']==$uid);
             ?>
             <div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:7px;padding:7px 10px;margin-top:6px;font-size:.72rem;color:#9a3412;">
                 <div style="display:flex;align-items:center;gap:5px;margin-bottom:<?= ($rw_c && $rw_c['note']) ? '5px' : '0' ?>">
                     <i class="bi bi-arrow-counterclockwise" style="color:#f97316;"></i>
                     <strong>Rework requested<?= $rw_c && $rw_c['reviewer_name'] ? ' by ' . sanitize($rw_c['reviewer_name']) : '' ?></strong>
-                    <?php if ($t['assigned_to']==$uid || $t['assigned_by']==$uid): ?>
-                    <?php if ($fill_url_rw_c): ?>
-                    <a href="<?= htmlspecialchars($fill_url_rw_c) ?>" target="_blank" class="ms-auto"
-                       style="background:#ea580c;color:#fff;border:none;border-radius:5px;font-size:.68rem;padding:2px 8px;text-decoration:none;display:inline-block;white-space:nowrap">
-                        <i class="bi bi-box-arrow-up-right me-1"></i>Resubmit
-                    </a>
-                    <?php elseif ($t['needs_approval']): ?>
-                    <button type="button" style="background:#ea580c;color:#fff;border:none;border-radius:5px;font-size:.68rem;padding:2px 8px;cursor:pointer;white-space:nowrap"
-                        onclick="event.stopPropagation();openCompletionModal(<?= $t['id'] ?>,'<?= addslashes(sanitize($t['title'])) ?>')">Resubmit</button>
-                    <?php endif; ?>
+                    <?php if ($is_my_rework): ?>
+                        <?php if ($fill_url_rw_c): ?>
+                        <a href="<?= htmlspecialchars($fill_url_rw_c) ?>" target="_blank" class="ms-auto"
+                           style="background:#ea580c;color:#fff;border:none;border-radius:5px;font-size:.68rem;padding:2px 8px;text-decoration:none;display:inline-block;white-space:nowrap">
+                            <i class="bi bi-box-arrow-up-right me-1"></i>Re-submit
+                        </a>
+                        <?php elseif ($t['needs_approval']): ?>
+                        <button type="button" class="ms-auto" style="background:#ea580c;color:#fff;border:none;border-radius:5px;font-size:.68rem;padding:2px 8px;cursor:pointer;white-space:nowrap"
+                            onclick="event.stopPropagation();openCompletionModal(<?= $t['id'] ?>,'<?= addslashes(sanitize($t['title'])) ?>')">
+                            <i class="bi bi-send me-1"></i>Re-submit
+                        </button>
+                        <?php else: ?>
+                        <a href="task_detail.php?id=<?= $t['id'] ?>" class="ms-auto"
+                           style="background:#ea580c;color:#fff;border:none;border-radius:5px;font-size:.68rem;padding:2px 8px;text-decoration:none;display:inline-block;white-space:nowrap">
+                            <i class="bi bi-arrow-right-circle me-1"></i>View &amp; Fix
+                        </a>
+                        <?php endif; ?>
                     <?php endif; ?>
                 </div>
                 <?php if ($rw_c && $rw_c['note']): ?>
@@ -1839,7 +1847,21 @@ if (!empty($flash)): ?>
                     <?php else: ?><span class="text-muted" style="font-size:.8rem;">—</span><?php endif; ?>
                 </td>
                 <td>
-                    <div class="d-flex gap-1">
+                    <div class="d-flex gap-1 align-items-center flex-wrap">
+                        <?php if ($t['status']==='REWORK' && ($t['assigned_to']==$uid || $t['assigned_by']==$uid)): ?>
+                            <?php if ($t['needs_approval']): ?>
+                            <button type="button" class="btn btn-sm btn-warning"
+                                style="font-size:.72rem;border-radius:6px;white-space:nowrap;"
+                                onclick="openCompletionModal(<?= $t['id'] ?>,'<?= addslashes(sanitize($t['title'])) ?>')">
+                                <i class="bi bi-send me-1"></i>Re-submit
+                            </button>
+                            <?php else: ?>
+                            <a href="task_detail.php?id=<?= $t['id'] ?>" class="btn btn-sm btn-warning"
+                               style="font-size:.72rem;border-radius:6px;white-space:nowrap;">
+                                <i class="bi bi-arrow-right-circle me-1"></i>Fix &amp; Done
+                            </a>
+                            <?php endif; ?>
+                        <?php endif; ?>
                         <a href="task_detail.php?id=<?= $t['id'] ?>" class="btn btn-sm" style="background:#f1f5f9;border:none;border-radius:6px;color:#475569;"><i class="bi bi-arrow-right-circle"></i></a>
                         <?php $can_del2 = !$hr_view && ($is_tl || ($t['assigned_by']==$uid && $t['assigned_to']==$uid));
                         if ($can_del2): ?>
@@ -1869,6 +1891,7 @@ $kanban_cols = [
     'TODO'        => ['label'=>'To Do',       'dot'=>'#64748b'],
     'IN_PROGRESS' => ['label'=>'In Progress', 'dot'=>'#3b82f6'],
     'REVIEW'      => ['label'=>'In Review',   'dot'=>'#f59e0b'],
+    'REWORK'      => ['label'=>'Rework',      'dot'=>'#f97316'],
     'BLOCKED'     => ['label'=>'Blocked',     'dot'=>'#ef4444'],
     'DONE'        => ['label'=>'Done',         'dot'=>'#22c55e'],
 ];
@@ -1933,7 +1956,7 @@ $kanban_cols = [
             $fill_url_k = $fm_k[1];
         }
         ?>
-        <?php if ($t['needs_approval'] && $kst !== 'DONE'): ?>
+        <?php if ($t['needs_approval'] && !in_array($kst, ['DONE','REWORK'])): ?>
         <div style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:6px;padding:4px 8px;margin-top:6px;font-size:.68rem;color:#6d28d9;display:flex;align-items:center;gap:5px;">
             <i class="bi bi-patch-check-fill" style="font-size:.65rem;"></i>
             <?php if ($kst === 'REVIEW'): ?>
@@ -1978,7 +2001,10 @@ $kanban_cols = [
                     </a>
                     <?php elseif ($t['needs_approval']): ?>
                     <button class="ms-auto" style="background:#ea580c;color:#fff;border:none;border-radius:5px;font-size:.63rem;padding:2px 7px;cursor:pointer;"
-                        onclick="openCompletionModal(<?= $t['id'] ?>,'<?= addslashes(sanitize($t['title'])) ?>')">Resubmit</button>
+                        onclick="openCompletionModal(<?= $t['id'] ?>,'<?= addslashes(sanitize($t['title'])) ?>')">Re-submit</button>
+                    <?php else: ?>
+                    <a href="task_detail.php?id=<?= $t['id'] ?>" class="ms-auto"
+                       style="background:#ea580c;color:#fff;border-radius:5px;font-size:.63rem;padding:2px 7px;text-decoration:none;">Fix &amp; Done</a>
                     <?php endif; ?>
                 <?php endif; ?>
             </div>
@@ -2531,7 +2557,8 @@ $filtered_approvals = array_filter($my_submitted_approvals, fn($r) => $r['approv
                 <th>Project</th>
                 <th>Status</th>
                 <th>Submitted</th>
-                <th>Note</th>
+                <th>Feedback</th>
+                <th></th>
             </tr></thead>
             <tbody>
             <?php foreach ($filtered_approvals as $ap): ?>
@@ -2550,7 +2577,14 @@ $filtered_approvals = array_filter($my_submitted_approvals, fn($r) => $r['approv
                     <?php endif; ?>
                 </td>
                 <td style="font-size:.78rem;color:#94a3b8;"><?= time_ago($ap['submitted_at']) ?></td>
-                <td style="font-size:.78rem;color:<?= $ap['approval_status']==='rework'?'#b91c1c':'#94a3b8' ?>;"><?= sanitize($ap['approval_note'] ?? '—') ?></td>
+                <td style="font-size:.78rem;color:<?= $ap['approval_status']==='rework'?'#b91c1c':'#94a3b8' ?>;max-width:200px;"><?= sanitize($ap['approval_note'] ?? '—') ?></td>
+                <td>
+                    <?php if ($ap['approval_status'] === 'rework'): ?>
+                    <a href="task_detail.php?id=<?= $ap['id'] ?>" class="btn btn-sm btn-warning" style="white-space:nowrap;font-size:.75rem;">
+                        <i class="bi bi-send me-1"></i>Re-submit
+                    </a>
+                    <?php endif; ?>
+                </td>
             </tr>
             <?php endforeach; ?>
             </tbody>
