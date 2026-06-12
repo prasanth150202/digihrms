@@ -1434,11 +1434,16 @@ if (!empty($flash)): ?>
 
 <?php if ($my_block_requests): ?>
 <div class="card border-0 shadow-sm mb-4" style="border-radius:14px;border-left:4px solid #ef4444!important;">
-    <div class="card-header bg-danger-subtle border-0 fw-semibold text-danger" style="border-radius:14px 14px 0 0;">
-        <i class="bi bi-slash-circle-fill me-2"></i>Waiting on You
-        <span class="badge bg-danger ms-2"><?= count($my_block_requests) ?></span>
+    <div class="card-header bg-danger-subtle border-0 fw-semibold text-danger d-flex align-items-center justify-content-between"
+         style="border-radius:14px 14px 0 0;cursor:pointer;user-select:none;"
+         id="waitingOnYouHeader"
+         onclick="toggleWaitingOnYou()">
+        <span><i class="bi bi-slash-circle-fill me-2"></i>Waiting on You
+            <span class="badge bg-danger ms-2"><?= count($my_block_requests) ?></span>
+        </span>
+        <i class="bi bi-chevron-up ms-2" id="waitingOnYouChevron" style="transition:transform .2s;font-size:.85rem;"></i>
     </div>
-    <div class="card-body p-0">
+    <div class="card-body p-0" id="waitingOnYouBody">
         <?php foreach ($my_block_requests as $i => $br): ?>
         <div style="padding:14px 18px;<?= $i > 0 ? 'border-top:1px solid #fee2e2;' : '' ?>display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap;">
             <div style="flex:1;min-width:220px;">
@@ -1459,6 +1464,25 @@ if (!empty($flash)): ?>
         <?php endforeach; ?>
     </div>
 </div>
+<script>
+(function () {
+    var body    = document.getElementById('waitingOnYouBody');
+    var chevron = document.getElementById('waitingOnYouChevron');
+    var KEY     = 'woyCollapsed';
+    var collapsed = false;
+    try { collapsed = localStorage.getItem(KEY) === '1'; } catch(e) {}
+    if (collapsed) {
+        body.style.display = 'none';
+        chevron.style.transform = 'rotate(180deg)';
+    }
+    window.toggleWaitingOnYou = function () {
+        collapsed = !collapsed;
+        body.style.display    = collapsed ? 'none' : '';
+        chevron.style.transform = collapsed ? 'rotate(180deg)' : '';
+        try { localStorage.setItem(KEY, collapsed ? '1' : '0'); } catch(e) {}
+    };
+})();
+</script>
 <?php endif; ?>
 
 <?php if (!$my_tasks): ?>
@@ -3592,10 +3616,50 @@ function applyDateRange(selector, fromVal, toVal, countEl, noResEl) {
 
     // Date mode toggle (due vs created)
     let dateMode = 'due';
+
+    // ── Restore persisted filter state ──────────────────────
+    const FK = 'taskFilters';
+    try {
+        const saved = JSON.parse(localStorage.getItem(FK) || '{}');
+        if (search    && saved.q)      search.value    = saved.q;
+        if (priSel    && saved.pri)    priSel.value    = saved.pri;
+        if (stsSel    && saved.sts)    stsSel.value    = saved.sts;
+        if (projSel   && saved.proj)   projSel.value   = saved.proj;
+        if (memberSel && saved.mem)    memberSel.value = saved.mem;
+        if (dfFrom    && saved.from)   dfFrom.value    = saved.from;
+        if (dfTo      && saved.to)     dfTo.value      = saved.to;
+        if (saved.dateMode) {
+            dateMode = saved.dateMode;
+            document.querySelectorAll('[data-mode]').forEach(b =>
+                b.classList.toggle('active', b.dataset.mode === dateMode));
+        }
+        if (saved.preset) {
+            const pb = document.querySelector('#dfBarTasks [data-preset="'+saved.preset+'"]');
+            if (pb) pb.classList.add('active');
+        }
+    } catch(e) {}
+
+    function saveFilters() {
+        try {
+            const activePreset = document.querySelector('#dfBarTasks [data-preset].active');
+            localStorage.setItem(FK, JSON.stringify({
+                q:        search?.value    || '',
+                pri:      priSel?.value    || '',
+                sts:      stsSel?.value    || '',
+                proj:     projSel?.value   || '',
+                mem:      memberSel?.value || '',
+                from:     dfFrom?.value    || '',
+                to:       dfTo?.value      || '',
+                dateMode: dateMode,
+                preset:   activePreset ? activePreset.dataset.preset : '',
+            }));
+        } catch(e) {}
+    }
     document.querySelectorAll('[data-mode]').forEach(btn => {
         btn.addEventListener('click', function () {
             dateMode = this.dataset.mode;
             document.querySelectorAll('[data-mode]').forEach(b => b.classList.toggle('active', b.dataset.mode === dateMode));
+            saveFilters();
             applyAll();
         });
     });
@@ -3605,7 +3669,7 @@ function applyDateRange(selector, fromVal, toVal, countEl, noResEl) {
         btn.addEventListener('click', function () {
             const active = this.classList.contains('active');
             document.querySelectorAll('#dfBarTasks [data-preset]').forEach(b => b.classList.remove('active'));
-            if (active) { dfFrom.value = ''; dfTo.value = ''; applyAll(); return; }
+            if (active) { dfFrom.value = ''; dfTo.value = ''; saveFilters(); applyAll(); return; }
             this.classList.add('active');
             const p = this.dataset.preset;
             if (p === 'today')   { dfFrom.value = isoToday();      dfTo.value = isoToday(); }
@@ -3613,7 +3677,7 @@ function applyDateRange(selector, fromVal, toVal, countEl, noResEl) {
             if (p === 'month')   { dfFrom.value = isoMonthStart(); dfTo.value = isoMonthEnd(); }
             if (p === 'overdue') { dfFrom.value = '';               dfTo.value = isoYesterday(); }
             if (p === 'soon')    { dfFrom.value = isoToday();      dfTo.value = isoNDaysLater(7); }
-            applyAll();
+            saveFilters(); applyAll();
         });
     });
 
@@ -3621,7 +3685,7 @@ function applyDateRange(selector, fromVal, toVal, countEl, noResEl) {
     [dfFrom, dfTo].forEach(inp => {
         if (inp) inp.addEventListener('change', () => {
             document.querySelectorAll('#dfBarTasks [data-preset]').forEach(b => b.classList.remove('active'));
-            applyAll();
+            saveFilters(); applyAll();
         });
     });
 
@@ -3629,7 +3693,7 @@ function applyDateRange(selector, fromVal, toVal, countEl, noResEl) {
     if (dfClear) dfClear.addEventListener('click', () => {
         dfFrom.value = ''; dfTo.value = '';
         document.querySelectorAll('#dfBarTasks [data-preset]').forEach(b => b.classList.remove('active'));
-        applyAll();
+        saveFilters(); applyAll();
     });
 
     function applyAll() {
@@ -3674,11 +3738,11 @@ function applyDateRange(selector, fromVal, toVal, countEl, noResEl) {
     }
 
     [search, priSel, stsSel, projSel, memberSel].forEach(el => {
-        if (el) el.addEventListener('input', applyAll);
+        if (el) el.addEventListener('input', () => { saveFilters(); applyAll(); });
     });
 
-    // Apply member from URL on load
-    if (memberSel?.value) applyAll();
+    // Apply on load (restoring saved filters or member from URL)
+    applyAll();
     } catch(e) { console.warn('Task filter error:', e); }
 })();
 
