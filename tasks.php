@@ -362,6 +362,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             }
             // Sync DONE to DigiOps → triggers workflow advance
             _digiops_task_sync($conn, $tid, 'DONE');
+            if (!function_exists('advanceWorkflowRun')) require_once __DIR__ . '/trigger_engine.php';
+            advanceWorkflowRun($conn, $tid);
             if ($is_ajax) ajax_ok();
             set_flash('success', 'Task approved and marked as done.');
         }

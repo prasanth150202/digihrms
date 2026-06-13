@@ -95,7 +95,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         $conn->prepare("INSERT INTO task_comments (task_id,user_id,comment) VALUES (?,?,?)")
              ->execute([$tid, $uid, "✅ Approved by " . ($u['name'] ?? 'TL')]);
         log_task_activity($conn, $tid, $uid, 'APPROVED', 'Approved via TL review');
-        // Respond 200 so JS fetch resolves cleanly (page will reload)
+        if (!function_exists('advanceWorkflowRun')) require_once __DIR__ . '/trigger_engine.php';
+        advanceWorkflowRun($conn, $tid);
         exit;
     }
 
@@ -153,6 +154,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                  ->execute([$id, $uid, "Stage moved: {$old_status} → " . $_POST['new_status']]);
             log_task_activity($conn, $id, $uid, 'STATUS_CHANGED', "{$old_status} → ".$_POST['new_status']);
             _fire_status_trigger($id, $_POST['new_status'], $uid);
+            if ($_POST['new_status'] === 'DONE') {
+                if (!function_exists('advanceWorkflowRun')) require_once __DIR__ . '/trigger_engine.php';
+                advanceWorkflowRun($conn, $id);
+            }
 
             // Sync to DigiOps
             _digiops_task_sync($conn, $id, $_POST['new_status']);

@@ -52,7 +52,11 @@ function fireWorkflowOnPerson(PDO $conn, int $workflowId, int $targetUserId, int
     try {
         $layout = json_decode($workflow['published_layout'], true);
         _runWorkflowBfs($conn, $runId, $layout, $targetUserId, $context);
-        $conn->prepare("UPDATE hrms_workflow_runs SET status='completed', completed_at=NOW() WHERE id=?")->execute([$runId]);
+        $runStatus = $conn->prepare("SELECT status FROM hrms_workflow_runs WHERE id=? LIMIT 1");
+        $runStatus->execute([$runId]);
+        if ($runStatus->fetchColumn() === 'running') {
+            $conn->prepare("UPDATE hrms_workflow_runs SET status='completed', completed_at=NOW() WHERE id=?")->execute([$runId]);
+        }
         return ['ok'=>true,'run_id'=>$runId];
     } catch (Exception $e) {
         $conn->prepare("UPDATE hrms_workflow_runs SET status='failed' WHERE id=?")->execute([$runId]);
@@ -293,8 +297,12 @@ function _executeTrigger(PDO $conn, array $trigger, int $actorId, string $firedB
         $layout = json_decode($workflow['published_layout'], true);
         _runWorkflowBfs($conn, $runId, $layout, $actorId, $context);
 
-        // Mark run complete
-        $conn->prepare("UPDATE hrms_workflow_runs SET status='completed', completed_at=NOW() WHERE id=?")->execute([$runId]);
+        // Only mark completed if the run wasn't paused waiting for tasks
+        $runStatus = $conn->prepare("SELECT status FROM hrms_workflow_runs WHERE id=? LIMIT 1");
+        $runStatus->execute([$runId]);
+        if ($runStatus->fetchColumn() === 'running') {
+            $conn->prepare("UPDATE hrms_workflow_runs SET status='completed', completed_at=NOW() WHERE id=?")->execute([$runId]);
+        }
 
         // Update trigger last_fired_at + fire count
         $conn->prepare("UPDATE hrms_triggers SET last_fired_at=NOW() WHERE id=?")->execute([$trigger['id']]);
@@ -310,58 +318,112 @@ function _executeTrigger(PDO $conn, array $trigger, int $actorId, string $firedB
 }
 
 /**
- * BFS walk of the published workflow canvas — creates tasks
+ * Start a workflow run — fires only the first task node, then pauses.
+ * Downstream nodes fire via advanceWorkflowRun() as tasks are completed.
  */
 function _runWorkflowBfs(PDO $conn, int $runId, array $layout, int $actorId, array $context): void {
     $nodes = $layout['drawflow']['Home']['data'] ?? [];
     if (!$nodes) return;
 
-    // Find start node (is_start=true or first node)
+    // Find start node
     $startNodeKey = null;
     foreach ($nodes as $key => $node) {
         if (!empty($node['data']['is_start'])) { $startNodeKey = $key; break; }
     }
     if (!$startNodeKey) $startNodeKey = array_key_first($nodes);
 
-    $queue   = [$startNodeKey];
-    $visited = [];
+    // Store the full layout in the run so advanceWorkflowRun can walk it later
+    $ctx = array_merge($context, ['_layout' => $layout, '_actor_id' => $actorId]);
+    $conn->prepare("UPDATE hrms_workflow_runs SET context_json=? WHERE id=?")->execute([json_encode($ctx), $runId]);
 
-    while (!empty($queue)) {
-        $key = array_shift($queue);
-        if (isset($visited[$key])) continue;
-        $visited[$key] = true;
+    _fireNode($conn, $runId, $startNodeKey, $nodes, $actorId, $context);
+}
 
-        $node = $nodes[$key] ?? null;
-        if (!$node) continue;
+/**
+ * Fire a single node. For task nodes: create tasks and pause.
+ * For non-task nodes (condition, pass-through): resolve immediately and continue to next.
+ */
+function _fireNode(PDO $conn, int $runId, string $nodeKey, array $nodes, int $actorId, array $context): void {
+    $node = $nodes[$nodeKey] ?? null;
+    if (!$node) return;
 
-        $type = $node['data']['nodeType'] ?? $node['name'] ?? '';
-        $data = $node['data'] ?? [];
+    $type = $node['data']['nodeType'] ?? $node['name'] ?? '';
+    $data = $node['data'] ?? [];
 
-        if ($type === 'task') {
-            _executeTaskCardNode($conn, $runId, $key, $data, $actorId, $context);
-            // Queue outputs — but only after tasks complete (for BFS we queue immediately;
-            // completion detection is handled by hrms_workflow_task_instances status checks)
-            foreach (($node['outputs']['output_1']['connections'] ?? []) as $conn_) {
-                $queue[] = $conn_['node'];
-            }
+    $conn->prepare("UPDATE hrms_workflow_runs SET current_node_id=? WHERE id=?")->execute([$nodeKey, $runId]);
+    $conn->prepare("INSERT INTO hrms_workflow_node_log (run_id, node_id, node_type, result_json) VALUES (?,?,?,?)")
+         ->execute([$runId, $nodeKey, $type, json_encode(['status'=>'executed'])]);
+
+    if ($type === 'task') {
+        _executeTaskCardNode($conn, $runId, $nodeKey, $data, $actorId, $context);
+        // Pause here — advanceWorkflowRun() will fire next node once all tasks in this node are DONE
+        $conn->prepare("UPDATE hrms_workflow_runs SET status='paused' WHERE id=?")->execute([$runId]);
+    } elseif ($type === 'condition') {
+        $port      = _evaluateCondition($data, $context);
+        $outputKey = $port === 'yes' ? 'output_1' : 'output_2';
+        foreach (($node['outputs'][$outputKey]['connections'] ?? []) as $next) {
+            _fireNode($conn, $runId, $next['node'], $nodes, $actorId, $context);
         }
-        elseif ($type === 'condition') {
-            $port = _evaluateCondition($data, $context);
-            $outputKey = $port === 'yes' ? 'output_1' : 'output_2';
-            foreach (($node['outputs'][$outputKey]['connections'] ?? []) as $conn_) {
-                $queue[] = $conn_['node'];
-            }
+    } else {
+        // Pass-through node — continue immediately
+        foreach (($node['outputs']['output_1']['connections'] ?? []) as $next) {
+            _fireNode($conn, $runId, $next['node'], $nodes, $actorId, $context);
         }
-        else {
-            // Unknown node type — pass through
-            foreach (($node['outputs']['output_1']['connections'] ?? []) as $conn_) {
-                $queue[] = $conn_['node'];
-            }
-        }
+    }
+}
 
-        // Log node execution
-        $conn->prepare("INSERT INTO hrms_workflow_node_log (run_id, node_id, node_type, result_json) VALUES (?,?,?,?)")
-             ->execute([$runId, $key, $type, json_encode(['status'=>'executed'])]);
+/**
+ * Called when a task is marked DONE.
+ * Checks if all tasks in the current workflow node are done; if so, fires the next node.
+ */
+function advanceWorkflowRun(PDO $conn, int $taskId): void {
+    // Find the workflow task instance for this task
+    $inst = $conn->prepare("SELECT wti.*, wr.context_json, wr.status as run_status
+        FROM hrms_workflow_task_instances wti
+        JOIN hrms_workflow_runs wr ON wr.id = wti.run_id
+        WHERE wti.task_id = ? AND wr.status IN ('running','paused') LIMIT 1");
+    $inst->execute([$taskId]);
+    $row = $inst->fetch();
+    if (!$row) return;
+
+    $runId   = (int)$row['run_id'];
+    $nodeKey = $row['node_id'];
+
+    // Mark this instance done
+    $conn->prepare("UPDATE hrms_workflow_task_instances SET status='done', completed_at=NOW() WHERE task_id=? AND run_id=?")
+         ->execute([$taskId, $runId]);
+
+    // Check if all tasks in this node are now done
+    $pending = $conn->prepare("SELECT COUNT(*) FROM hrms_workflow_task_instances wti
+        JOIN tasks t ON t.id = wti.task_id
+        WHERE wti.run_id=? AND wti.node_id=? AND t.status NOT IN ('DONE')");
+    $pending->execute([$runId, $nodeKey]);
+    if ((int)$pending->fetchColumn() > 0) return; // still waiting on other tasks
+
+    // All tasks in this node are done — find the next node(s)
+    $ctx    = json_decode($row['context_json'] ?? '{}', true) ?? [];
+    $layout = $ctx['_layout'] ?? null;
+    $actorId = (int)($ctx['_actor_id'] ?? 0);
+    if (!$layout) {
+        // No layout stored — mark completed
+        $conn->prepare("UPDATE hrms_workflow_runs SET status='completed', completed_at=NOW() WHERE id=?")->execute([$runId]);
+        return;
+    }
+
+    $nodes = $layout['drawflow']['Home']['data'] ?? [];
+    $node  = $nodes[$nodeKey] ?? null;
+    $nextConnections = $node['outputs']['output_1']['connections'] ?? [];
+
+    if (empty($nextConnections)) {
+        // End of workflow
+        $conn->prepare("UPDATE hrms_workflow_runs SET status='completed', completed_at=NOW() WHERE id=?")->execute([$runId]);
+        return;
+    }
+
+    // Resume run and fire next node(s)
+    $conn->prepare("UPDATE hrms_workflow_runs SET status='running' WHERE id=?")->execute([$runId]);
+    foreach ($nextConnections as $next) {
+        _fireNode($conn, $runId, $next['node'], $nodes, $actorId, $ctx);
     }
 }
 
