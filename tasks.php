@@ -1564,6 +1564,9 @@ if (!empty($flash)): ?>
     $tl_stmt = $conn->prepare("SELECT COALESCE(SUM(hours),0) as h FROM task_time_logs WHERE task_id=?");
     $tl_stmt->execute([$t['id']]);
     $logged_hours = (float)$tl_stmt->fetchColumn();
+    $tt_stmt = $conn->prepare("SELECT COALESCE(SUM(duration_seconds),0) as s FROM task_timers WHERE task_id=? AND ended_at IS NOT NULL");
+    $tt_stmt->execute([$t['id']]);
+    $logged_hours += round((float)$tt_stmt->fetchColumn() / 3600, 2);
     $pct = $t['estimated_hours'] > 0 ? min(100, round(($logged_hours / $t['estimated_hours']) * 100)) : 0;
     $initials_a = strtoupper(substr($t['assignee_name'] ?? 'U', 0, 1));
     $days_left   = $t['due_date'] ? (int)((strtotime($t['due_date']) - time()) / 86400) : null;
@@ -1760,6 +1763,9 @@ if (!empty($flash)): ?>
                 $tl2 = $conn->prepare("SELECT COALESCE(SUM(hours),0) as h FROM task_time_logs WHERE task_id=?");
                 $tl2->execute([$t['id']]);
                 $lh2 = (float)$tl2->fetchColumn();
+                $tt2 = $conn->prepare("SELECT COALESCE(SUM(duration_seconds),0) as s FROM task_timers WHERE task_id=? AND ended_at IS NOT NULL");
+                $tt2->execute([$t['id']]);
+                $lh2 += round((float)$tt2->fetchColumn() / 3600, 2);
                 $pct2 = $t['estimated_hours'] > 0 ? min(100, round(($lh2 / $t['estimated_hours']) * 100)) : 0;
             ?>
             <tr class="task-item" id="task-card-<?= $t['id'] ?>"

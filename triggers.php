@@ -7,6 +7,7 @@ $u         = current_user();
 $uid       = $u['id'];
 $role      = $u['role'];
 $can_manage = has_role('SUPER_ADMIN','DEPT_MANAGER','TEAM_LEAD');
+$is_admin   = has_role('SUPER_ADMIN','DEPT_MANAGER');
 
 // ── AJAX ──────────────────────────────────────────────────────────────────
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -36,20 +37,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'toggle') {
         $id = (int)($b['id'] ?? 0);
         $active = (int)(!empty($b['active']));
-        $conn->prepare("UPDATE hrms_triggers SET is_active=? WHERE id=?")->execute([$active, $id]);
+        $where = $is_admin ? "id=?" : "id=? AND created_by={$uid}";
+        $conn->prepare("UPDATE hrms_triggers SET is_active=? WHERE {$where}")->execute([$active, $id]);
         echo json_encode(['ok'=>true]); exit;
     }
 
     // delete
     if ($action === 'delete') {
         $id = (int)($b['id'] ?? 0);
-        $conn->prepare("UPDATE hrms_triggers SET is_active=0 WHERE id=?")->execute([$id]);
+        $where = $is_admin ? "id=?" : "id=? AND created_by={$uid}";
+        $conn->prepare("UPDATE hrms_triggers SET is_active=-1 WHERE {$where}")->execute([$id]);
         echo json_encode(['ok'=>true]); exit;
     }
 
     // manual fire
     if ($action === 'fire') {
         $id = (int)($b['id'] ?? 0);
+        if (!$is_admin) {
+            $own = $conn->prepare("SELECT id FROM hrms_triggers WHERE id=? AND created_by=? LIMIT 1");
+            $own->execute([$id, $uid]);
+            if (!$own->fetch()) { echo json_encode(['ok'=>false,'msg'=>'Not authorised']); exit; }
+        }
         require_once 'trigger_engine.php';
         $result = fireTriggerById($conn, $id, $uid, 'manual');
         echo json_encode($result); exit;
@@ -68,6 +76,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // get logs
     if ($action === 'logs') {
         $id   = (int)($b['id'] ?? 0);
+        if (!$is_admin) {
+            $own = $conn->prepare("SELECT id FROM hrms_triggers WHERE id=? AND created_by=? LIMIT 1");
+            $own->execute([$id, $uid]);
+            if (!$own->fetch()) { echo json_encode(['ok'=>false,'msg'=>'Not authorised']); exit; }
+        }
         $logs = $conn->prepare("SELECT l.*, u.name as fired_by_name FROM hrms_trigger_log l LEFT JOIN users u ON u.id=? WHERE l.trigger_id=? ORDER BY l.fired_at DESC LIMIT 20");
         $logs->execute([$uid, $id]);
         echo json_encode(['ok'=>true,'logs'=>$logs->fetchAll()]); exit;
@@ -77,15 +90,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 // ── Fetch triggers list ────────────────────────────────────────────────────
-$triggers = $conn->query("
-    SELECT t.*, u.name as creator_name, w.name as workflow_name,
-           (SELECT COUNT(*) FROM hrms_trigger_log l WHERE l.trigger_id=t.id) as fire_count
-    FROM hrms_triggers t
-    JOIN users u ON u.id = t.created_by
-    LEFT JOIN hrms_workflow_templates w ON w.id = t.workflow_id
-    WHERE t.is_active >= 0
-    ORDER BY t.created_at DESC
-")->fetchAll();
+if (has_role('SUPER_ADMIN', 'DEPT_MANAGER')) {
+    $triggers = $conn->query("
+        SELECT t.*, u.name as creator_name, w.name as workflow_name,
+               (SELECT COUNT(*) FROM hrms_trigger_log l WHERE l.trigger_id=t.id) as fire_count
+        FROM hrms_triggers t
+        JOIN users u ON u.id = t.created_by
+        LEFT JOIN hrms_workflow_templates w ON w.id = t.workflow_id
+        WHERE t.is_active > -1
+        ORDER BY t.created_at DESC
+    ")->fetchAll();
+} else {
+    // TEAM_LEAD, EMPLOYEE — own triggers only
+    $stmt = $conn->prepare("
+        SELECT t.*, u.name as creator_name, w.name as workflow_name,
+               (SELECT COUNT(*) FROM hrms_trigger_log l WHERE l.trigger_id=t.id) as fire_count
+        FROM hrms_triggers t
+        JOIN users u ON u.id = t.created_by
+        LEFT JOIN hrms_workflow_templates w ON w.id = t.workflow_id
+        WHERE t.is_active > -1 AND t.created_by = ?
+        ORDER BY t.created_at DESC
+    ");
+    $stmt->execute([$uid]);
+    $triggers = $stmt->fetchAll();
+}
 
 // Fetch published workflows for dropdown
 $workflows = $conn->query("
@@ -154,11 +182,9 @@ include 'header.php';
         <h5 class="mb-0 fw-bold" style="color:var(--text-primary);">Triggers & Actions</h5>
         <div style="font-size:12px;color:var(--text-muted);">Define when to automatically run a workflow</div>
     </div>
-    <?php if ($can_manage): ?>
     <button class="btn btn-primary btn-sm" onclick="openDrawer()" style="border-radius:8px;font-weight:600;">
         <i class="bi bi-plus-lg me-1"></i> New Trigger
     </button>
-    <?php endif; ?>
 </div>
 
 <!-- Toolbar -->
