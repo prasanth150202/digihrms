@@ -5,6 +5,12 @@ $page      = 'leaves';
 $pageTitle = 'Leave Management';
 $u         = current_user();
 
+// ── Auto-migrate permission_requests for TL approval chain ──
+try { $conn->exec("ALTER TABLE permission_requests ADD COLUMN tl_approved_by INT NULL DEFAULT NULL"); } catch (PDOException $e) {}
+try { $conn->exec("ALTER TABLE permission_requests ADD COLUMN tl_approved_at DATETIME NULL DEFAULT NULL"); } catch (PDOException $e) {}
+// Extend status enum to include TL_APPROVED
+try { $conn->exec("ALTER TABLE permission_requests MODIFY COLUMN status ENUM('PENDING','TL_APPROVED','APPROVED','REJECTED') NOT NULL DEFAULT 'PENDING'"); } catch (PDOException $e) {}
+
 // ── Leave approval chain ─────────────────────────────────
 if (isset($_GET['action'], $_GET['id']) && has_role('SUPER_ADMIN','HR_ADMIN','TEAM_LEAD')) {
     $lid = (int)$_GET['id'];
@@ -100,14 +106,43 @@ if (isset($_GET['action'], $_GET['id']) && $_GET['action'] === 'revoke') {
     header("Location: leaves.php"); exit;
 }
 
-// Approve / Reject permission (HR/Admin/TL)
+// Approve / Reject permission (HR/Admin/TL two-step chain)
 if (isset($_GET['perm_action'], $_GET['perm_id']) && has_role('SUPER_ADMIN', 'HR_ADMIN', 'TEAM_LEAD')) {
-    $map = ['approve' => 'APPROVED', 'reject' => 'REJECTED'];
-    $s   = $map[$_GET['perm_action']] ?? null;
-    if ($s) {
-        $conn->prepare("UPDATE permission_requests SET status=?, approved_by=? WHERE id=?")
-             ->execute([$s, $u['id'], (int)$_GET['perm_id']]);
-        set_flash('success', "Permission request $s.");
+    $pid = (int)$_GET['perm_id'];
+    $act = $_GET['perm_action'];
+
+    // TL: verify permission belongs to their dept
+    if ($u['role'] === 'TEAM_LEAD') {
+        $tlDeptChk2 = $conn->prepare("
+            SELECT er.dept_id FROM employee_roles er
+            JOIN employees e ON e.id = er.employee_id
+            JOIN users u2 ON u2.email = e.email
+            WHERE u2.id = ? AND er.is_team_lead = 1 LIMIT 1
+        ");
+        $tlDeptChk2->execute([$u['id']]);
+        $tlDeptId2 = $tlDeptChk2->fetchColumn();
+        $permDeptChk = $conn->prepare("SELECT e.dept_id FROM permission_requests p JOIN employees e ON e.id=p.employee_id WHERE p.id=? LIMIT 1");
+        $permDeptChk->execute([$pid]);
+        $permDeptId = $permDeptChk->fetchColumn();
+        if (!$tlDeptId2 || $tlDeptId2 != $permDeptId) {
+            set_flash('danger', 'Access denied.'); header("Location: leaves.php"); exit;
+        }
+    }
+
+    if ($act === 'tl_approve') {
+        $conn->prepare("UPDATE permission_requests SET status='TL_APPROVED', tl_approved_by=?, tl_approved_at=NOW() WHERE id=? AND status='PENDING'")
+             ->execute([$u['id'], $pid]);
+        set_flash('success', 'Permission approved by TL. Awaiting HR final approval.');
+
+    } elseif ($act === 'approve' && has_role('SUPER_ADMIN', 'HR_ADMIN')) {
+        $conn->prepare("UPDATE permission_requests SET status='APPROVED', approved_by=? WHERE id=? AND status='TL_APPROVED'")
+             ->execute([$u['id'], $pid]);
+        set_flash('success', 'Permission request fully approved.');
+
+    } elseif ($act === 'reject') {
+        $conn->prepare("UPDATE permission_requests SET status='REJECTED', approved_by=? WHERE id=?")
+             ->execute([$u['id'], $pid]);
+        set_flash('danger', 'Permission request rejected.');
     }
     header("Location: leaves.php"); exit;
 }
@@ -157,8 +192,11 @@ if (has_role('SUPER_ADMIN', 'HR_ADMIN')) {
         LEFT JOIN employees e   ON l.employee_id = e.id
         LEFT JOIN users utl     ON utl.id = l.tl_approved_by
         ORDER BY l.created_at DESC")->fetchAll();
-    $permissions = $conn->query("SELECT p.*, e.name as emp_name, e.emp_code
-        FROM permission_requests p LEFT JOIN employees e ON p.employee_id = e.id
+    $permissions = $conn->query("SELECT p.*, e.name as emp_name, e.emp_code,
+        utl.name as tl_approver_name
+        FROM permission_requests p
+        LEFT JOIN employees e ON p.employee_id = e.id
+        LEFT JOIN users utl ON utl.id = p.tl_approved_by
         ORDER BY p.created_at DESC")->fetchAll();
     $leave_balance = [];
 
@@ -184,13 +222,15 @@ if (has_role('SUPER_ADMIN', 'HR_ADMIN')) {
     $stmt->execute([$tlDeptId ?: 0, $u['email']]);
     $leaves = $stmt->fetchAll();
 
-    $permissions = $conn->prepare("SELECT p.*, e.name as emp_name, e.emp_code
+    $permStmt = $conn->prepare("SELECT p.*, e.name as emp_name, e.emp_code,
+        utl.name as tl_approver_name
         FROM permission_requests p
         JOIN employees e ON p.employee_id = e.id
+        LEFT JOIN users utl ON utl.id = p.tl_approved_by
         WHERE e.dept_id = ? AND e.email != ?
         ORDER BY p.created_at DESC");
-    $permissions->execute([$tlDeptId ?: 0, $u['email']]);
-    $permissions = $permissions->fetchAll();
+    $permStmt->execute([$tlDeptId ?: 0, $u['email']]);
+    $permissions = $permStmt->fetchAll();
     $leave_balance = [];
 
     // TL's own leaves (separate from team view — they skip TL approval, go to HR)
@@ -471,8 +511,16 @@ include 'header.php';
     </div>
 </div>
 
-<!-- Permissions Table (HR/Admin only) -->
-<?php if (has_role('SUPER_ADMIN', 'HR_ADMIN') && $permissions): ?>
+<!-- Permissions Table (HR/Admin + Team Lead) -->
+<?php
+$perm_status_map = [
+    'PENDING'     => ['color' => 'warning',   'label' => 'Awaiting TL'],
+    'TL_APPROVED' => ['color' => 'info',      'label' => 'Awaiting HR'],
+    'APPROVED'    => ['color' => 'success',   'label' => 'Approved'],
+    'REJECTED'    => ['color' => 'danger',    'label' => 'Rejected'],
+];
+?>
+<?php if (has_role('SUPER_ADMIN', 'HR_ADMIN', 'TEAM_LEAD') && !empty($permissions)): ?>
 <div class="mt-4">
     <h6 class="fw-bold mb-3"><i class="bi bi-shield-check me-2 text-info"></i>Permission Requests</h6>
     <div class="card border-0 shadow-sm" style="border-radius:12px;">
@@ -492,15 +540,18 @@ include 'header.php';
                         </tr>
                     </thead>
                     <tbody>
-                    <?php foreach ($permissions as $p): ?>
+                    <?php if (!$permissions): ?>
+                        <tr><td colspan="8" class="text-center py-4 text-muted small">No permission requests</td></tr>
+                    <?php endif; ?>
+                    <?php foreach ($permissions as $p):
+                        $ps = $perm_status_map[$p['status']] ?? ['color'=>'secondary','label'=>$p['status']];
+                        $ptype_label = ['LATE_COMING'=>'Late Coming','EARLY_GOING'=>'Early Going','IN_BETWEEN'=>'In Between'];
+                    ?>
                     <tr>
                         <td class="ps-4">
                             <div class="fw-semibold small"><?= sanitize($p['emp_name'] ?? 'Unknown') ?></div>
                             <div class="text-muted small"><?= sanitize($p['emp_code'] ?? '') ?></div>
                         </td>
-                        <?php
-                        $ptype_label = ['LATE_COMING'=>'Late Coming','EARLY_GOING'=>'Early Going','IN_BETWEEN'=>'In Between'];
-                        ?>
                         <td class="small"><?= $ptype_label[$p['permission_type']] ?? sanitize(str_replace('_',' ',$p['permission_type'])) ?></td>
                         <td class="small"><?= date('d M Y', strtotime($p['request_date'])) ?></td>
                         <td class="small text-muted">
@@ -512,18 +563,43 @@ include 'header.php';
                             ?>
                         </td>
                         <td class="small text-center">
-                            <?php if ($p['duration_hours'] > 0): ?>
+                            <?php if (!empty($p['duration_hours']) && $p['duration_hours'] > 0): ?>
                             <span class="badge bg-info-subtle text-info"><?= $p['duration_hours'] ?>h</span>
                             <?php else: ?>
                             <span class="text-muted">—</span>
                             <?php endif; ?>
                         </td>
                         <td class="small"><span title="<?= sanitize($p['reason']) ?>"><?= strlen($p['reason']) > 35 ? sanitize(substr($p['reason'],0,35)).'…' : sanitize($p['reason']) ?></span></td>
-                        <td><span class="badge bg-<?= badge($p['status']) ?> rounded-pill"><?= $p['status'] ?></span></td>
                         <td>
-                            <?php if ($p['status'] === 'PENDING'): ?>
-                            <a href="?perm_action=approve&perm_id=<?= $p['id'] ?>" class="btn btn-sm btn-success py-0 px-2" onclick="return hConfirmSync(event,'Approve?')"><i class="bi bi-check"></i></a>
-                            <a href="?perm_action=reject&perm_id=<?= $p['id'] ?>"  class="btn btn-sm btn-danger  py-0 px-2 ms-1" onclick="return hConfirmSync(event,'Reject?')"><i class="bi bi-x"></i></a>
+                            <span class="badge bg-<?= $ps['color'] ?> rounded-pill"><?= $ps['label'] ?></span>
+                            <?php if (!empty($p['tl_approver_name']) && in_array($p['status'],['TL_APPROVED','APPROVED'])): ?>
+                            <div class="text-muted mt-1" style="font-size:.65rem;">
+                                <i class="bi bi-person-check me-1"></i>TL: <?= sanitize($p['tl_approver_name']) ?>
+                            </div>
+                            <?php endif; ?>
+                        </td>
+                        <td>
+                            <?php if ($p['status'] === 'PENDING' && has_role('SUPER_ADMIN','HR_ADMIN','TEAM_LEAD')): ?>
+                                <a href="?perm_action=tl_approve&perm_id=<?= $p['id'] ?>" class="btn btn-sm btn-warning py-0 px-2" onclick="return hConfirmSync(event,'TL-approve this permission?')">
+                                    <i class="bi bi-person-check"></i> TL Approve
+                                </a>
+                                <a href="?perm_action=reject&perm_id=<?= $p['id'] ?>" class="btn btn-sm btn-outline-danger py-0 px-2 ms-1" onclick="return hConfirmSync(event,'Reject?')">
+                                    <i class="bi bi-x"></i>
+                                </a>
+                            <?php elseif ($p['status'] === 'TL_APPROVED' && has_role('SUPER_ADMIN','HR_ADMIN')): ?>
+                                <a href="?perm_action=approve&perm_id=<?= $p['id'] ?>" class="btn btn-sm btn-success py-0 px-2" onclick="return hConfirmSync(event,'Final-approve this permission?')">
+                                    <i class="bi bi-check2-all"></i> Approve
+                                </a>
+                                <a href="?perm_action=reject&perm_id=<?= $p['id'] ?>" class="btn btn-sm btn-outline-danger py-0 px-2 ms-1" onclick="return hConfirmSync(event,'Reject?')">
+                                    <i class="bi bi-x"></i>
+                                </a>
+                            <?php elseif ($p['status'] === 'TL_APPROVED' && has_role('TEAM_LEAD')): ?>
+                                <span class="badge bg-success-subtle text-success" style="font-size:.7rem;">
+                                    <i class="bi bi-check2 me-1"></i>Approved by you — awaiting HR
+                                </span>
+                                <a href="?perm_action=reject&perm_id=<?= $p['id'] ?>" class="btn btn-sm btn-outline-danger py-0 px-2 ms-1" onclick="return hConfirmSync(event,'Reject?')">
+                                    <i class="bi bi-x"></i>
+                                </a>
                             <?php endif; ?>
                         </td>
                     </tr>

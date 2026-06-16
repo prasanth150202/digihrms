@@ -632,6 +632,9 @@
     <a href="triggers.php" class="nav-link <?= ($page ?? '') === 'triggers' ? 'active' : '' ?>">
         <i class="bi bi-lightning-charge"></i> Triggers
     </a>
+    <a href="learning.php" class="nav-link <?= ($page ?? '') === 'learning' ? 'active' : '' ?>">
+        <i class="bi bi-mortarboard-fill"></i> Learning
+    </a>
     <a href="leaves.php" class="nav-link <?= ($page ?? '') === 'leaves' ? 'active' : '' ?>">
         <i class="bi bi-calendar-check"></i> Leave &amp; Permissions
     </a>

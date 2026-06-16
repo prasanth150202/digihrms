@@ -474,10 +474,36 @@ function _executeTaskCardNode(PDO $conn, int $runId, string $nodeKey, array $dat
         $conn->prepare("INSERT INTO hrms_workflow_task_instances (run_id, node_id, task_index, task_id, assigned_to, status) VALUES (?,?,?,?,?,?)")
              ->execute([$runId, $nodeKey, $idx, $taskId, $primaryAssignee, 'pending']);
 
+        // ── Learning task setup ────────────────────────────────────────────
+        if (!empty($task['is_learning'])) {
+            $badgeName       = trim($task['badge_name'] ?? 'Learning Badge');
+            $badgeIcon       = trim($task['badge_icon'] ?? '🏅');
+            $learningMaterial = trim($task['learning_material'] ?? '');
+            $passPct         = (int)($task['pass_pct'] ?? 80);
+            $quizRequired    = $passPct > 0 ? 1 : 0;
+
+            // Upsert badge by name to avoid duplicates across runs
+            $existBadge = $conn->prepare("SELECT id FROM hrms_badges WHERE name=? LIMIT 1");
+            $existBadge->execute([$badgeName]);
+            $badgeId = $existBadge->fetchColumn();
+            if (!$badgeId) {
+                $conn->prepare("INSERT INTO hrms_badges (name, icon, created_by) VALUES (?,?,?)")
+                     ->execute([$badgeName, $badgeIcon, $actorId ?: 0]);
+                $badgeId = (int)$conn->lastInsertId();
+            }
+
+            $conn->prepare("UPDATE tasks SET is_learning_task=1, learning_badge_id=?, learning_material=?, learning_pass_pct=?, quiz_required=? WHERE id=?")
+                 ->execute([$badgeId, $learningMaterial, $passPct, $quizRequired, $taskId]);
+
+            $notifMsg = "New learning task: {$title} — earn the {$badgeIcon} {$badgeName} badge!";
+        } else {
+            $notifMsg = "New task assigned: {$title}";
+        }
+
         // Notify each assignee
         foreach ($resolvedAssignees as $uid) {
             if ($uid) {
-                hrms_notify($conn, $uid, 'task', "New task assigned: {$title}", $desc, "task_detail.php?id={$taskId}");
+                hrms_notify($conn, $uid, 'task', $notifMsg, $desc, "task_detail.php?id={$taskId}");
             }
         }
     }

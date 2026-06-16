@@ -9,6 +9,12 @@ $pageTitle = 'Task Management';
 
 // One-time migration: ensure completion_note column exists
 try { $conn->exec("ALTER TABLE task_approvals ADD COLUMN completion_note TEXT NULL DEFAULT NULL"); } catch (PDOException $e) {}
+// Learning module columns
+try { $conn->exec("ALTER TABLE tasks ADD COLUMN is_learning_task  TINYINT(1) NOT NULL DEFAULT 0"); } catch (PDOException $e) {}
+try { $conn->exec("ALTER TABLE tasks ADD COLUMN learning_badge_id INT NULL"); } catch (PDOException $e) {}
+try { $conn->exec("ALTER TABLE tasks ADD COLUMN learning_material TEXT NULL"); } catch (PDOException $e) {}
+try { $conn->exec("ALTER TABLE tasks ADD COLUMN learning_pass_pct TINYINT NOT NULL DEFAULT 80"); } catch (PDOException $e) {}
+try { $conn->exec("ALTER TABLE tasks ADD COLUMN quiz_required     TINYINT(1) NOT NULL DEFAULT 0"); } catch (PDOException $e) {}
 $u         = current_user();
 $uid       = $u['id'];
 $role      = $u['role'];

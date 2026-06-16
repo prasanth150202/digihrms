@@ -46,6 +46,21 @@ $recent  = pts_recent($conn, $id, 15);
 $weekly  = pts_leaderboard($conn, 5, 'weekly');
 $alltime = pts_leaderboard($conn, 5, 'alltime');
 
+// Earned badges
+$earned_badges = [];
+try {
+    $eb = $conn->prepare("
+        SELECT b.name, b.icon, b.description, eb.earned_at, t.title as task_title
+        FROM hrms_employee_badges eb
+        JOIN hrms_badges b ON b.id = eb.badge_id
+        LEFT JOIN tasks t ON t.id = eb.task_id
+        WHERE eb.employee_id = ?
+        ORDER BY eb.earned_at DESC
+    ");
+    $eb->execute([$id]);
+    $earned_badges = $eb->fetchAll();
+} catch (Exception $e) {}
+
 // My rank
 $s = $conn->prepare("
     SELECT COUNT(*) + 1 FROM (
@@ -291,6 +306,26 @@ include 'header.php';
                 </div>
             </div>
         </div>
+
+        <!-- Badges shelf -->
+        <?php if ($earned_badges): ?>
+        <div class="card border-0 shadow-sm mb-4" style="border-radius:14px;border-left:4px solid #7c3aed !important;">
+            <div class="card-body p-4">
+                <h6 class="fw-bold mb-3" style="color:#7c3aed;"><i class="bi bi-mortarboard-fill me-2"></i>Learning Badges <span class="ms-1 small fw-normal text-muted">(<?= count($earned_badges) ?>)</span></h6>
+                <div class="d-flex flex-wrap gap-2">
+                <?php foreach ($earned_badges as $b): ?>
+                <div class="d-flex align-items-center gap-2 px-3 py-2 rounded-pill" style="background:rgba(124,58,237,.08);border:1px solid rgba(124,58,237,.2);" title="Earned from: <?= sanitize($b['task_title'] ?? '') ?> · <?= date('d M Y', strtotime($b['earned_at'])) ?>">
+                    <span style="font-size:1.3rem;line-height:1;"><?= sanitize($b['icon']) ?></span>
+                    <div>
+                        <div class="small fw-bold" style="color:#7c3aed;line-height:1.2;"><?= sanitize($b['name']) ?></div>
+                        <div style="font-size:10px;color:var(--text-muted);"><?= date('d M Y', strtotime($b['earned_at'])) ?></div>
+                    </div>
+                </div>
+                <?php endforeach; ?>
+                </div>
+            </div>
+        </div>
+        <?php endif; ?>
 
         <div class="row g-4">
 

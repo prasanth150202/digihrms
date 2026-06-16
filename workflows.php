@@ -918,6 +918,21 @@ function buildTaskItem(nodeId, idx, t = {}) {
             <input type="checkbox" class="ti-approval" id="ta-${nodeId}-${idx}" ${t.require_approval?'checked':''}>
             <span>Require TL approval</span>
         </div>
+        <div class="approval-row" style="margin-top:6px;border-top:1px solid var(--card-bdr);padding-top:6px;">
+            <input type="checkbox" class="ti-is-learning" id="tl-chk-${nodeId}-${idx}" ${t.is_learning?'checked':''}
+                onchange="document.getElementById('lp-${nodeId}-${idx}').style.display=this.checked?'block':'none'">
+            <span style="color:#7c3aed;font-weight:600;"><i class="bi bi-mortarboard"></i> Learning Task</span>
+        </div>
+        <div id="lp-${nodeId}-${idx}" style="display:${t.is_learning?'block':'none'};margin-top:6px;padding:8px;background:rgba(124,58,237,.06);border:1px solid rgba(124,58,237,.25);border-radius:7px;">
+            <label>Badge Name</label>
+            <input type="text" class="ti-badge-name" placeholder="e.g. Shopify Champion" value="${escAttr(t.badge_name||'')}">
+            <label>Badge Icon (emoji)</label>
+            <input type="text" class="ti-badge-icon" placeholder="🏅" maxlength="4" value="${escAttr(t.badge_icon||'🏅')}" style="width:60px;">
+            <label>Learning Material (URL or text)</label>
+            <textarea class="ti-learning-material" placeholder="https://... or paste content here" style="min-height:50px;">${escAttr(t.learning_material||'')}</textarea>
+            <label>Quiz Pass % <span style="font-weight:400;color:var(--text-muted);">(0 = no quiz, TL reviews answers)</span></label>
+            <input type="number" class="ti-pass-pct" min="0" max="100" value="${t.pass_pct||80}" style="width:70px;">
+        </div>
     </div>`;
 }
 
@@ -1036,7 +1051,12 @@ function extractTasks(nodeId) {
             priority: item.querySelector('.ti-priority')?.value || 'MEDIUM',
             due_days: parseInt(item.querySelector('.ti-due')?.value || '1'),
             assignees,
-            require_approval: item.querySelector('.ti-approval')?.checked || false
+            require_approval:    item.querySelector('.ti-approval')?.checked    || false,
+            is_learning:         item.querySelector('.ti-is-learning')?.checked  || false,
+            badge_name:          item.querySelector('.ti-badge-name')?.value     || '',
+            badge_icon:          item.querySelector('.ti-badge-icon')?.value     || '🏅',
+            learning_material:   item.querySelector('.ti-learning-material')?.value || '',
+            pass_pct:            parseInt(item.querySelector('.ti-pass-pct')?.value || '80'),
         };
     });
 }
