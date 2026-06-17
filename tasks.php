@@ -627,6 +627,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         // Sync status to DigiOps if status changed
         if ($field === 'status') {
             _digiops_task_sync($conn, $tid, $value);
+
+            // Auto-upsert approval record when needs_approval task moves to REVIEW via quick-edit
+            if ($value === 'REVIEW' && !empty($task['needs_approval'])) {
+                $existsAppr2 = $conn->prepare("SELECT id FROM task_approvals WHERE task_id=? AND status IN ('pending','rework')");
+                $existsAppr2->execute([$tid]);
+                if ($existsAppr2->fetchColumn()) {
+                    $conn->prepare("UPDATE task_approvals SET status='pending', submitted_by=?, submitted_at=NOW(), reviewed_by=NULL, reviewed_at=NULL, note=NULL WHERE task_id=? AND status IN ('pending','rework')")
+                         ->execute([$uid, $tid]);
+                } else {
+                    $conn->prepare("INSERT INTO task_approvals (task_id, submitted_by, status) VALUES (?,?,'pending')")
+                         ->execute([$tid, $uid]);
+                }
+                // Notify TL (assigned_by) if different from current user
+                if ($task['assigned_by'] && $task['assigned_by'] != $uid) {
+                    hrms_notify($conn, (int)$task['assigned_by'], 'task_approval',
+                        'Task ready for review: ' . mb_substr($task['title'], 0, 60),
+                        'Awaiting your approval.',
+                        'tasks.php?tab=approvals'
+                    );
+                }
+            }
         }
 
         echo json_encode(['ok' => true, 'field' => $field, 'value' => $value]);
@@ -849,7 +870,29 @@ if (!$hr_view) {
     $my_submitted_approvals = $s->fetchAll();
 
     // Tasks pending my approval (TL/manager view — only my team)
+    // Also self-heal: auto-insert missing task_approvals rows for tasks stuck in REVIEW with needs_approval
     if ($is_tl) {
+        // Fix any REVIEW+needs_approval tasks that have no pending approval record (caused by quick_edit or kanban drag)
+        if ($role === 'SUPER_ADMIN') {
+            $orphan_fix = $conn->query(
+                "SELECT t.id, t.assigned_to FROM tasks t
+                 WHERE t.status = 'REVIEW' AND t.needs_approval = 1 AND t.deleted_at IS NULL
+                 AND NOT EXISTS (SELECT 1 FROM task_approvals ta WHERE ta.task_id = t.id AND ta.status IN ('pending','rework'))"
+            );
+        } else {
+            $team_ids_str = $my_team ? implode(',', array_map('intval', array_column($my_team, 'id'))) : '0';
+            $orphan_fix = $conn->query(
+                "SELECT t.id, t.assigned_to FROM tasks t
+                 WHERE t.status = 'REVIEW' AND t.needs_approval = 1 AND t.deleted_at IS NULL
+                 AND (t.assigned_to IN ($team_ids_str) OR t.assigned_by = $uid)
+                 AND NOT EXISTS (SELECT 1 FROM task_approvals ta WHERE ta.task_id = t.id AND ta.status IN ('pending','rework'))"
+            );
+        }
+        foreach ($orphan_fix->fetchAll() as $orph) {
+            $conn->prepare("INSERT INTO task_approvals (task_id, submitted_by, status) VALUES (?,?,'pending')")
+                 ->execute([$orph['id'], $orph['assigned_to'] ?: $uid]);
+        }
+
         if ($role === 'SUPER_ADMIN') {
             $s = $conn->query("SELECT t.*, ta.id as approval_id, ta.submitted_at, ta.submitted_by,
                 ta.completion_note,
@@ -863,8 +906,6 @@ if (!$hr_view) {
                 WHERE ta.status = 'pending' AND t.deleted_at IS NULL
                 ORDER BY ta.submitted_at ASC");
         } else {
-            // TL sees only their team members' approvals
-            $team_ids_str = $my_team ? implode(',', array_map('intval', array_column($my_team, 'id'))) : '0';
             $s = $conn->query("SELECT t.*, ta.id as approval_id, ta.submitted_at, ta.submitted_by,
                 ta.completion_note,
                 (SELECT tc.comment FROM task_comments tc WHERE tc.task_id = t.id ORDER BY tc.created_at DESC LIMIT 1) as latest_comment,
