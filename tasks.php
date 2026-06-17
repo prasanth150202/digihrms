@@ -853,6 +853,7 @@ if (!$hr_view) {
         if ($role === 'SUPER_ADMIN') {
             $s = $conn->query("SELECT t.*, ta.id as approval_id, ta.submitted_at, ta.submitted_by,
                 ta.completion_note,
+                (SELECT tc.comment FROM task_comments tc WHERE tc.task_id = t.id ORDER BY tc.created_at DESC LIMIT 1) as latest_comment,
                 u.name as submitter_name, u2.name as creator_name, p.name as project_name
                 FROM task_approvals ta
                 JOIN tasks t ON t.id = ta.task_id
@@ -866,6 +867,7 @@ if (!$hr_view) {
             $team_ids_str = $my_team ? implode(',', array_map('intval', array_column($my_team, 'id'))) : '0';
             $s = $conn->query("SELECT t.*, ta.id as approval_id, ta.submitted_at, ta.submitted_by,
                 ta.completion_note,
+                (SELECT tc.comment FROM task_comments tc WHERE tc.task_id = t.id ORDER BY tc.created_at DESC LIMIT 1) as latest_comment,
                 u.name as submitter_name, u2.name as creator_name, p.name as project_name
                 FROM task_approvals ta
                 JOIN tasks t ON t.id = ta.task_id
@@ -2410,16 +2412,28 @@ $type_label = ['document'=>'Document / File','link'=>'Link / URL','text'=>'Text 
                 <?php if ($t['description']): ?>
                 <p class="text-muted small mb-2" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;"><?= sanitize($t['description']) ?></p>
                 <?php endif; ?>
-                <?php if (!empty($t['completion_note'])): ?>
-                <div style="background:#f0fdf4;border:1px solid #86efac;border-radius:8px;padding:10px 14px;margin-bottom:10px;">
-                    <div style="font-size:.72rem;font-weight:700;color:#166534;margin-bottom:4px;">
-                        <i class="bi bi-pencil-square me-1"></i>Completion Note from <?= sanitize($t['submitter_name'] ?? 'assignee') ?>
+                <?php
+                $display_note = !empty($t['completion_note']) ? $t['completion_note'] : null;
+                $note_is_fallback = false;
+                if (!$display_note && !empty($t['latest_comment'])) {
+                    $lc = $t['latest_comment'];
+                    // Skip auto-generated stage-moved comments
+                    if (!preg_match('/^Stage moved:/i', $lc) && !preg_match('/^Request approved/i', $lc)) {
+                        $display_note = $lc;
+                        $note_is_fallback = true;
+                    }
+                }
+                ?>
+                <?php if ($display_note): ?>
+                <div style="background:<?= $note_is_fallback ? '#eff6ff' : '#f0fdf4' ?>;border:1px solid <?= $note_is_fallback ? '#bfdbfe' : '#86efac' ?>;border-radius:8px;padding:10px 14px;margin-bottom:10px;">
+                    <div style="font-size:.72rem;font-weight:700;color:<?= $note_is_fallback ? '#1d4ed8' : '#166534' ?>;margin-bottom:4px;">
+                        <i class="bi bi-<?= $note_is_fallback ? 'chat-text' : 'pencil-square' ?> me-1"></i><?= $note_is_fallback ? 'Latest comment from ' : 'Completion note from ' ?><?= sanitize($t['submitter_name'] ?? 'assignee') ?>
                     </div>
-                    <div style="font-size:.83rem;color:#14532d;line-height:1.5;white-space:pre-wrap;"><?= sanitize($t['completion_note']) ?></div>
+                    <div style="font-size:.83rem;color:<?= $note_is_fallback ? '#1e3a5f' : '#14532d' ?>;line-height:1.5;white-space:pre-wrap;"><?= sanitize($display_note) ?></div>
                 </div>
                 <?php else: ?>
                 <div style="background:#fefce8;border:1px solid #fde68a;border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:.76rem;color:#92400e;">
-                    <i class="bi bi-exclamation-triangle me-1"></i>No completion note provided.
+                    <i class="bi bi-exclamation-triangle me-1"></i>No completion note provided — task was moved to review without a note.
                 </div>
                 <?php endif; ?>
                 <div class="d-flex align-items-center gap-3 flex-wrap" style="font-size:.78rem;color:#64748b;">
