@@ -412,13 +412,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         $allowed = ['TODO','IN_PROGRESS','REVIEW','DONE','REWORK'];
         $ns = $_POST['new_status'];
         if (in_array($ns, $allowed)) {
-            $chk = $conn->prepare("SELECT assigned_to, assigned_by, status, needs_approval, to_tl_id, title FROM tasks WHERE id=?");
+            $chk = $conn->prepare("SELECT assigned_to, assigned_by, status, needs_approval, to_tl_id, title, is_learning_task, quiz_required FROM tasks WHERE id=?");
             $chk->execute([$tid]);
             $t_row = $chk->fetch();
             // Block direct DONE if needs_approval and not TL
             if ($ns === 'DONE' && !empty($t_row['needs_approval']) && !$is_tl) {
+                if ($is_ajax) ajax_err('This task requires TL approval. Use "Submit for Review" instead.');
                 set_flash('danger', 'This task requires approval. Use "Submit for Review" instead.');
                 header("Location: task_detail.php?id=$tid"); exit;
+            }
+            // Block direct DONE if learning task with quiz not yet passed
+            if ($ns === 'DONE' && !empty($t_row['is_learning_task']) && !empty($t_row['quiz_required']) && !$is_tl) {
+                $empR = $conn->prepare("SELECT e.id FROM employees e JOIN users u ON u.email=e.email WHERE u.id=? LIMIT 1");
+                $empR->execute([$uid]);
+                $empId = (int)($empR->fetchColumn() ?: 0);
+                $quizPassed = false;
+                if ($empId) {
+                    $laQ = $conn->prepare("SELECT passed, tl_approved FROM hrms_task_quiz_attempts WHERE task_id=? AND employee_id=? ORDER BY attempted_at DESC LIMIT 1");
+                    $laQ->execute([$tid, $empId]);
+                    $la = $laQ->fetch();
+                    if ($la) {
+                        $quizPassed = $la['passed'] && ($la['tl_approved'] === '1' || empty($t_row['needs_approval']));
+                    }
+                    $qqCheck = $conn->prepare("SELECT id FROM hrms_task_quiz WHERE task_id=? LIMIT 1");
+                    $qqCheck->execute([$tid]);
+                    if (!$qqCheck->fetchColumn()) $quizPassed = true;
+                }
+                if (!$quizPassed) {
+                    if ($is_ajax) ajax_err('Complete the quiz on this task before marking it done.');
+                    set_flash('danger', 'You must complete the quiz before marking this task done.');
+                    header("Location: task_detail.php?id=$tid"); exit;
+                }
             }
             if ($t_row && ($is_tl || $t_row['assigned_to']==$uid || $t_row['assigned_by']==$uid)) {
                 // Auto-manage timer based on status change
@@ -1952,6 +1976,19 @@ $kanban_cols = [
     'BLOCKED'     => ['label'=>'Blocked',     'dot'=>'#ef4444'],
     'DONE'        => ['label'=>'Done',         'dot'=>'#22c55e'],
 ];
+
+// Pre-fetch quiz-passed task IDs for the current user (used on kanban cards)
+$quiz_passed_task_ids = [];
+try {
+    $kEmpQ = $conn->prepare("SELECT e.id FROM employees e JOIN users u ON u.email=e.email WHERE u.id=? LIMIT 1");
+    $kEmpQ->execute([$uid]);
+    $kEmpId = (int)($kEmpQ->fetchColumn() ?: 0);
+    if ($kEmpId) {
+        $kQpQ = $conn->prepare("SELECT DISTINCT task_id FROM hrms_task_quiz_attempts WHERE employee_id=? AND passed=1");
+        $kQpQ->execute([$kEmpId]);
+        $quiz_passed_task_ids = array_column($kQpQ->fetchAll(), 'task_id');
+    }
+} catch (PDOException $e) {}
 ?>
 <div id="viewKanban" style="display:none;">
 <div class="kanban-board" id="kanbanBoard">
@@ -1983,10 +2020,23 @@ $kanban_cols = [
          data-due="<?= $t['due_date'] ?? '' ?>"
          data-created="<?= substr($t['created_at'],0,10) ?>"
          data-needs-approval="<?= $t['needs_approval'] ? '1' : '0' ?>"
+         data-is-learning="<?= !empty($t['is_learning_task']) ? '1' : '0' ?>"
+         data-quiz-required="<?= !empty($t['quiz_required']) ? '1' : '0' ?>"
+         data-quiz-passed="<?= in_array($t['id'], $quiz_passed_task_ids) ? '1' : '0' ?>"
          <?= $can_drag_k ? 'draggable="true"' : '' ?>>
         <div class="d-flex justify-content-between align-items-start mb-2">
             <span class="pri-badge pri-<?= $t['priority'] ?>" style="font-size:.63rem;"><?= $t['priority'] ?></span>
-            <?php if ($ov_k): ?><span class="overdue-pill"><i class="bi bi-exclamation-triangle-fill"></i>Late</span><?php endif; ?>
+            <div class="d-flex align-items-center gap-1">
+                <?php if (!empty($t['is_learning_task'])): ?>
+                <span style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:6px;padding:2px 7px;font-size:.63rem;color:#6d28d9;display:inline-flex;align-items:center;gap:4px;font-weight:600;">
+                    <i class="bi bi-mortarboard-fill" style="font-size:.6rem;"></i>Learning
+                    <?php if (!empty($t['quiz_required'])): ?>
+                    <span style="background:#ede9fe;border-radius:4px;padding:0 4px;font-size:.6rem;">QUIZ</span>
+                    <?php endif; ?>
+                </span>
+                <?php endif; ?>
+                <?php if ($ov_k): ?><span class="overdue-pill"><i class="bi bi-exclamation-triangle-fill"></i>Late</span><?php endif; ?>
+            </div>
         </div>
         <div class="fw-semibold mb-1" style="font-size:.83rem;line-height:1.3;">
             <a href="task_detail.php?id=<?= $t['id'] ?>" class="text-decoration-none text-dark"><?= sanitize($t['title']) ?></a>
@@ -3461,6 +3511,32 @@ $cal_tasks_json = json_encode(array_values(array_map(function($t) {
     </div>
 </div>
 
+<!-- Quiz Required Modal (shown when dragging a learning task to DONE without passing quiz) -->
+<div class="modal fade" id="quizRequiredModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered" style="max-width:400px;">
+        <div class="modal-content" style="border-radius:16px;border:none;box-shadow:0 20px 60px rgba(0,0,0,.18);">
+            <div class="modal-body px-4 pt-4 pb-3 text-center">
+                <div style="width:60px;height:60px;background:#f5f3ff;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 16px;">
+                    <i class="bi bi-mortarboard-fill" style="font-size:1.6rem;color:#7c3aed;"></i>
+                </div>
+                <h6 class="fw-bold mb-2" style="font-size:1.05rem;">Quiz Not Completed</h6>
+                <p class="text-muted mb-0" style="font-size:.84rem;">
+                    This is a learning task. You must <strong>pass the quiz</strong> before it can be marked as done.<br>
+                    Open the task to take the quiz.
+                </p>
+            </div>
+            <div class="modal-footer border-0 px-4 pb-4 pt-1 d-flex gap-2 justify-content-center">
+                <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal"
+                        style="border-radius:8px;padding:7px 22px;">Cancel</button>
+                <a href="#" id="quizRequiredTaskLink" class="btn btn-sm fw-semibold"
+                   style="background:#7c3aed;color:#fff;border-radius:8px;padding:7px 22px;">
+                    <i class="bi bi-pencil-square me-1"></i>Open Task & Take Quiz
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- Completion Note Modal (required before submitting for approval) -->
 <div class="modal fade" id="completionNoteModal" tabindex="-1">
     <div class="modal-dialog modal-dialog-centered" style="max-width:480px;">
@@ -4076,10 +4152,14 @@ document.querySelectorAll('.appr-info-tip').forEach(function(el) {
             if (oc) oc.textContent = Math.max(0, parseInt(oc.textContent) - 1);
             if (nc) nc.textContent = parseInt(nc.textContent) + 1;
 
-            // If dragging to DONE and needs_approval, show modal instead of alert
             const needsApproval = dragCard.dataset.needsApproval === '1';
-            if (newStatus === 'DONE' && needsApproval) {
-                // Revert visual
+            const isLearning    = dragCard.dataset.isLearning   === '1';
+            const quizRequired  = dragCard.dataset.quizRequired === '1';
+            const quizPassed    = dragCard.dataset.quizPassed   === '1';
+            const isTlUser      = <?= $is_tl ? 'true' : 'false' ?>;
+
+            // Helper: revert a drag back to the original column
+            function revertDrag() {
                 const origCol = document.getElementById('kc-' + oldStatus);
                 if (origCol) {
                     origCol.querySelectorAll('.kb-empty').forEach(el => el.remove());
@@ -4093,9 +4173,23 @@ document.querySelectorAll('.appr-info-tip').forEach(function(el) {
                     if (oc2) oc2.textContent = parseInt(oc2.textContent) + 1;
                     if (nc2) nc2.textContent = Math.max(0, parseInt(nc2.textContent) - 1);
                 }
+            }
+
+            // Priority 1: quiz must be passed first (takes precedence over approval check)
+            if (newStatus === 'DONE' && isLearning && quizRequired && !quizPassed && !isTlUser) {
+                revertDrag();
+                document.getElementById('quizRequiredTaskLink').href = 'task_detail.php?id=' + taskId + '&open_quiz=1';
+                new bootstrap.Modal(document.getElementById('quizRequiredModal')).show();
+                return;
+            }
+
+            // Priority 2: approval required (quiz already passed or not required)
+            if (newStatus === 'DONE' && needsApproval && !isTlUser) {
+                revertDrag();
                 new bootstrap.Modal(document.getElementById('needsApprovalModal')).show();
                 return;
             }
+
             const fd = new FormData();
             fd.append('action',     'update_status');
             fd.append('task_id',    taskId);

@@ -82,6 +82,31 @@ if ($role === 'EMPLOYEE' && $task['assigned_to'] != $uid && $task['assigned_by']
 
 $is_internaldigi_flow = $task['description'] && strpos($task['description'], '[internaldigi workflow]') !== false;
 
+// ── Learning context — pre-computed here so POST handlers can use these vars ──
+$is_learning     = !empty($task['is_learning_task']);
+$my_emp_id       = 0;
+$employee_passed = false;
+$quiz_pending_tl = false;
+if ($is_learning) {
+    try {
+        $empQ = $conn->prepare("SELECT e.id FROM employees e JOIN users u ON u.email=e.email WHERE u.id=? LIMIT 1");
+        $empQ->execute([$uid]);
+        $my_emp_id = (int)($empQ->fetchColumn() ?: 0);
+        if ($my_emp_id) {
+            $laQ = $conn->prepare("SELECT * FROM hrms_task_quiz_attempts WHERE task_id=? AND employee_id=? ORDER BY attempted_at DESC LIMIT 1");
+            $laQ->execute([$id, $my_emp_id]);
+            $latestAttemptPre = $laQ->fetch() ?: null;
+            if ($latestAttemptPre) {
+                $employee_passed = (bool)$latestAttemptPre['passed'] && ($latestAttemptPre['tl_approved'] === '1' || empty($task['needs_approval']));
+                $quiz_pending_tl = !empty($task['needs_approval']) && (bool)$latestAttemptPre['passed'] && is_null($latestAttemptPre['tl_approved']);
+            }
+            $qqCheck = $conn->prepare("SELECT id FROM hrms_task_quiz WHERE task_id=? LIMIT 1");
+            $qqCheck->execute([$id]);
+            if (!$qqCheck->fetchColumn()) $employee_passed = true;
+        }
+    } catch (PDOException $e) { /* keep $is_learning true so form still shows */ }
+}
+
 // POST handlers
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     $can_act = $task['assigned_to']==$uid || $task['assigned_by']==$uid
@@ -125,10 +150,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         if (in_array($_POST['new_status'], $allowed) && $task['status'] !== 'BLOCKED') {
             $old_status = $task['status'];
 
-            // Block DONE on learning tasks until quiz is approved by TL
+            // Block DONE on learning tasks until quiz is passed
             if ($_POST['new_status'] === 'DONE' && !empty($task['is_learning_task']) && !empty($task['quiz_required']) && !$is_tl_local) {
                 if (!$employee_passed) {
-                    set_flash('danger', 'You must pass the quiz and get TL approval before marking this task done.');
+                    $quizMsg = !empty($task['needs_approval'])
+                        ? 'You must pass the quiz and get TL approval before marking this task done.'
+                        : 'You must complete and pass the quiz before marking this task done.';
+                    set_flash('danger', $quizMsg);
                     header("Location: task_detail.php?id=$id"); exit;
                 }
             }
@@ -322,8 +350,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 
     // ── Quiz: submit answers ───────────────────────────────────────────────
     if ($_POST['action'] === 'submit_quiz' && $is_learning && $can_act) {
-        if (!$my_emp_id) { set_flash('danger','Employee record not found.'); header("Location: task_detail.php?id=$id"); exit; }
-        if ($quiz_pending_tl) { set_flash('warning','Your answers are awaiting TL review.'); header("Location: task_detail.php?id=$id"); exit; }
+        $is_quiz_ajax = !empty($_POST['_ajax']);
+
+        if (!$my_emp_id) {
+            if ($is_quiz_ajax) { header('Content-Type: application/json'); echo json_encode(['error' => 'Employee record not found.']); exit; }
+            set_flash('danger','Employee record not found.'); header("Location: task_detail.php?id=$id"); exit;
+        }
+        // Block quiz submission unless task is in REVIEW or REWORK (learning must be completed first)
+        if (!in_array($task['status'], ['REVIEW', 'REWORK']) && !$is_tl_local) {
+            if ($is_quiz_ajax) { header('Content-Type: application/json'); echo json_encode(['error' => 'Submit your work for review before taking the quiz.']); exit; }
+            set_flash('danger','Submit your work for review before taking the quiz.'); header("Location: task_detail.php?id=$id"); exit;
+        }
+        if ($quiz_pending_tl) {
+            if ($is_quiz_ajax) { header('Content-Type: application/json'); echo json_encode(['error' => 'Your answers are already awaiting TL review.']); exit; }
+            set_flash('warning','Your answers are awaiting TL review.'); header("Location: task_detail.php?id=$id"); exit;
+        }
 
         $questions = $conn->prepare("SELECT * FROM hrms_task_quiz WHERE task_id=? ORDER BY sort_order");
         $questions->execute([$id]);
@@ -332,7 +373,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         $correct = 0;
         $answers = [];
         foreach ($questions as $q) {
-            $submitted      = (int)($_POST['q_' . $q['id']] ?? -1);
+            $submitted         = (int)($_POST['q_' . $q['id']] ?? -1);
             $answers[$q['id']] = $submitted;
             if ($submitted === (int)$q['correct_idx']) $correct++;
         }
@@ -342,12 +383,46 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 
         $conn->prepare("INSERT INTO hrms_task_quiz_attempts (task_id, employee_id, answers_json, score_pct, passed) VALUES (?,?,?,?,?)")
              ->execute([$id, $my_emp_id, json_encode($answers), $scorePct, $passed]);
+        $attemptId = (int)$conn->lastInsertId();
 
+        $pendingTl = false;
         if ($passed) {
-            log_task_activity($conn, $id, $uid, 'QUIZ_SUBMITTED', "Score: {$scorePct}% — Awaiting TL review");
-            set_flash('success', "Score: {$scorePct}% — Passed! Waiting for TL to review your answers.");
+            if (empty($task['needs_approval'])) {
+                $conn->prepare("UPDATE hrms_task_quiz_attempts SET tl_approved=1, tl_reviewed_at=NOW() WHERE id=?")->execute([$attemptId]);
+                if (!empty($task['learning_badge_id'])) {
+                    $conn->prepare("INSERT IGNORE INTO hrms_employee_badges (employee_id, badge_id, task_id) VALUES (?,?,?)")
+                         ->execute([$my_emp_id, (int)$task['learning_badge_id'], $id]);
+                }
+                try {
+                    if (!function_exists('pts_award')) require_once __DIR__ . '/points_helper.php';
+                    pts_award($conn, $my_emp_id, 'hrms_quiz_passed',        (string)$id, 'hrms_learning', 'Quiz passed');
+                    pts_award($conn, $my_emp_id, 'hrms_learning_completed', (string)$id, 'hrms_learning', 'Learning task completed');
+                } catch (Exception $e) {}
+                $conn->prepare("UPDATE tasks SET status='DONE', updated_at=NOW() WHERE id=?")->execute([$id]);
+                log_task_activity($conn, $id, $uid, 'QUIZ_PASSED', "Score: {$scorePct}% — Task auto-completed");
+                try {
+                    if (!function_exists('advanceWorkflowRun')) require_once __DIR__ . '/trigger_engine.php';
+                    advanceWorkflowRun($conn, $id);
+                } catch (Exception $e) {}
+            } else {
+                $pendingTl = true;
+                log_task_activity($conn, $id, $uid, 'QUIZ_SUBMITTED', "Score: {$scorePct}% — Awaiting TL review");
+            }
         } else {
             log_task_activity($conn, $id, $uid, 'QUIZ_FAILED', "Score: {$scorePct}% — needed {$passMark}%");
+        }
+
+        if ($is_quiz_ajax) {
+            header('Content-Type: application/json');
+            echo json_encode(['passed' => (bool)$passed, 'score' => $scorePct, 'pass_mark' => $passMark, 'pending_tl' => $pendingTl]);
+            exit;
+        }
+
+        if ($passed) {
+            set_flash('success', $pendingTl
+                ? "Score: {$scorePct}% — Passed! Waiting for TL to review your answers."
+                : "Score: {$scorePct}% — Passed! Task marked as done.");
+        } else {
             set_flash('warning', "Score: {$scorePct}%. You need {$passMark}% to pass. Try again.");
         }
         header("Location: task_detail.php?id=$id"); exit;
@@ -517,16 +592,17 @@ if ($is_learning) { try {
         $la->execute([$id, $my_emp_id]);
         $latest_attempt = $la->fetch() ?: null;
 
-        // Passed = auto-score passed AND tl approved (or no quiz)
+        // Passed = quiz passed AND (tl approved OR no approval required)
         if ($latest_attempt) {
-            $employee_passed  = $latest_attempt['passed'] && $latest_attempt['tl_approved'] === '1';
-            $quiz_pending_tl  = $latest_attempt['passed'] && is_null($latest_attempt['tl_approved']);
+            $employee_passed = $latest_attempt['passed'] && ($latest_attempt['tl_approved'] === '1' || empty($task['needs_approval']));
+            $quiz_pending_tl = !empty($task['needs_approval']) && $latest_attempt['passed'] && is_null($latest_attempt['tl_approved']);
         }
         if (!$quiz_questions) $employee_passed = true; // no quiz configured yet
     }
 } catch (PDOException $e) { $is_learning = false; } }
 $can_act_display = $task['assigned_to']==$uid || $task['assigned_by']==$uid
                  || in_array($role, ['SUPER_ADMIN','TEAM_LEAD','DEPT_MANAGER']);
+$is_tl_local     = in_array($role, ['SUPER_ADMIN','TEAM_LEAD','DEPT_MANAGER']);
 
 // Fetch all users (for block request person picker — exclude HR_ADMIN and self)
 $all_users_flat = [];
@@ -568,10 +644,22 @@ include 'header.php';
     <!-- Task Card -->
     <div class="card border-0 shadow-sm mb-4" style="border-radius:14px;">
         <div class="card-body p-4">
-            <div class="d-flex gap-2 mb-3 flex-wrap">
+            <div class="d-flex gap-2 mb-3 flex-wrap align-items-center">
                 <span class="badge bg-<?= $priority_color[$task['priority']] ?> rounded-pill"><?= $task['priority'] ?></span>
                 <span class="badge bg-<?= $status_color[$task['status']] ?? 'secondary' ?> rounded-pill"><?= str_replace('_',' ',$task['status']) ?></span>
                 <?php if ($overdue): ?><span class="badge bg-danger rounded-pill">OVERDUE</span><?php endif; ?>
+                <?php if ($is_learning && !empty($badge_info)): ?>
+                <span class="d-inline-flex align-items-center gap-1 rounded-pill px-2 py-1"
+                      style="background:#f5f3ff;border:1px solid #ddd8fe;color:#7c3aed;font-size:.72rem;font-weight:600;line-height:1.3;">
+                    <span style="font-size:.95rem;line-height:1;"><?= sanitize($badge_info['icon']) ?></span>
+                    <?= sanitize($badge_info['name']) ?>
+                </span>
+                <?php elseif ($is_learning): ?>
+                <span class="d-inline-flex align-items-center gap-1 rounded-pill px-2 py-1"
+                      style="background:#f5f3ff;border:1px solid #ddd8fe;color:#7c3aed;font-size:.72rem;font-weight:600;line-height:1.3;">
+                    <i class="bi bi-mortarboard-fill"></i> Learning Task
+                </span>
+                <?php endif; ?>
             </div>
             <h5 class="fw-bold mb-2"><?= sanitize($task['title']) ?></h5>
             <?php if ($task['description']): ?>
@@ -663,7 +751,10 @@ include 'header.php';
             <?php endif; ?>
 
             <!-- Move Status -->
-            <?php if (!$hr_view && $next_status && ($task['assigned_to']==$uid || in_array($role,['SUPER_ADMIN','TEAM_LEAD','DEPT_MANAGER']))): ?>
+            <?php
+            $quiz_locks_done = $next_status === 'DONE' && $is_learning && !empty($task['quiz_required']) && !$employee_passed && !$is_tl_local;
+            ?>
+            <?php if (!$hr_view && $next_status && ($task['assigned_to']==$uid || in_array($role,['SUPER_ADMIN','TEAM_LEAD','DEPT_MANAGER'])) && !$quiz_locks_done): ?>
             <form method="POST" class="mt-3">
                 <input type="hidden" name="action" value="update_status">
                 <input type="hidden" name="new_status" value="<?= $next_status ?>">
@@ -672,13 +763,18 @@ include 'header.php';
                     <?= $task['status'] === 'REWORK' ? 'Resume Work' : $next_label[$next_status] ?>
                 </button>
             </form>
+            <?php elseif ($quiz_locks_done): ?>
+            <div class="mt-3 small p-2 rounded d-flex align-items-center gap-2" style="background:#fef9c3;border:1px solid #fde047;color:#854d0e;">
+                <i class="bi bi-lock-fill"></i> Complete and pass the quiz below to finish this task.
+            </div>
             <?php endif; ?>
 
             <!-- Mark Done directly from REWORK — only when task does NOT need approval -->
             <?php
             $can_mark_done = !$hr_view && $task['status'] === 'REWORK'
                 && ($task['assigned_to']==$uid || in_array($role,['SUPER_ADMIN','TEAM_LEAD','DEPT_MANAGER']))
-                && empty($task['needs_approval']);
+                && empty($task['needs_approval'])
+                && !($is_learning && !empty($task['quiz_required']) && !$employee_passed && !$is_tl_local);
             ?>
             <?php if ($can_mark_done): ?>
             <form method="POST" class="mt-2">
@@ -764,57 +860,72 @@ include 'header.php';
 
             <?php if ($task['quiz_required'] && $quiz_questions): ?>
             <?php if ($employee_passed): ?>
-                <div class="alert py-2 small mb-0" style="background:#dcfce7;border:1px solid #86efac;color:#166534;border-radius:8px;">
-                    <i class="bi bi-patch-check-fill me-1"></i>Quiz passed and approved — badge earned!
-                    <?php if ($latest_attempt): ?>
-                    <span class="ms-2 opacity-75">Score: <?= $latest_attempt['score_pct'] ?>%</span>
-                    <?php endif; ?>
+                <div class="p-3 rounded d-flex align-items-center gap-2 mb-0" style="background:#dcfce7;border:1px solid #86efac;color:#166534;border-radius:10px;">
+                    <i class="bi bi-patch-check-fill fs-5"></i>
+                    <div>
+                        <div class="fw-semibold small">Quiz Passed — Task Complete!</div>
+                        <?php if ($latest_attempt): ?>
+                        <div class="small opacity-75">Score: <?= $latest_attempt['score_pct'] ?>%</div>
+                        <?php endif; ?>
+                    </div>
                 </div>
             <?php elseif ($quiz_pending_tl): ?>
-                <div class="alert py-2 small mb-0" style="background:#fef9c3;border:1px solid #fde047;color:#854d0e;border-radius:8px;">
-                    <i class="bi bi-hourglass-split me-1"></i>Your answers (score: <?= $latest_attempt['score_pct'] ?>%) are awaiting TL review.
+                <div class="p-3 rounded d-flex align-items-center gap-2 mb-0" style="background:#fef9c3;border:1px solid #fde047;color:#854d0e;border-radius:10px;">
+                    <i class="bi bi-hourglass-split fs-5"></i>
+                    <div>
+                        <div class="fw-semibold small">Awaiting TL Review</div>
+                        <div class="small opacity-75">Your answers (score: <?= $latest_attempt['score_pct'] ?>%) have been submitted and are being reviewed.</div>
+                    </div>
                 </div>
             <?php else: ?>
-                <?php if ($latest_attempt && !$latest_attempt['passed']): ?>
-                <div class="alert py-2 small mb-2" style="background:#fee2e2;border:1px solid #fca5a5;color:#dc2626;border-radius:8px;">
-                    <i class="bi bi-x-circle me-1"></i>Last attempt: <?= $latest_attempt['score_pct'] ?>% — need <?= $task['learning_pass_pct'] ?>% to pass.
-                    <?php if ($latest_attempt['tl_note']): ?>
-                    TL note: <?= sanitize($latest_attempt['tl_note']) ?>
-                    <?php endif; ?>
+                <?php $hadFailedAttempt = !empty($latest_attempt) && !$latest_attempt['passed']; ?>
+                <?php if ($hadFailedAttempt): ?>
+                <div class="p-2 rounded small mb-3 d-flex align-items-start gap-2" style="background:#fee2e2;border:1px solid #fca5a5;color:#dc2626;border-radius:8px;">
+                    <i class="bi bi-x-circle mt-1 flex-shrink-0"></i>
+                    <div>
+                        Last attempt: <strong><?= $latest_attempt['score_pct'] ?>%</strong> — need <?= $task['learning_pass_pct'] ?>% to pass.
+                        <?php if (!empty($latest_attempt['tl_note'])): ?>
+                        <div class="mt-1 text-muted">TL note: <?= sanitize($latest_attempt['tl_note']) ?></div>
+                        <?php endif; ?>
+                    </div>
                 </div>
                 <?php endif; ?>
-                <div class="fw-semibold small mb-2" style="color:var(--text-secondary);">
-                    Quiz — <?= count($quiz_questions) ?> question<?= count($quiz_questions)>1?'s':'' ?> · <?= $task['learning_pass_pct'] ?>% to pass
-                </div>
-                <form method="POST">
-                    <input type="hidden" name="action" value="submit_quiz">
-                    <?php foreach ($quiz_questions as $qi => $q): ?>
-                    <?php $opts = json_decode($q['options'], true) ?? []; ?>
-                    <div class="mb-3 p-3 rounded" style="background:var(--body-bg);border:1px solid var(--card-bdr);">
-                        <div class="small fw-semibold mb-2"><?= ($qi+1) ?>. <?= sanitize($q['question']) ?></div>
-                        <?php foreach ($opts as $oi => $opt): ?>
-                        <div class="form-check mb-1">
-                            <input class="form-check-input" type="radio" name="q_<?= $q['id'] ?>" value="<?= $oi ?>" id="q<?= $q['id'] ?>o<?= $oi ?>" required>
-                            <label class="form-check-label small" for="q<?= $q['id'] ?>o<?= $oi ?>"><?= sanitize($opt) ?></label>
-                        </div>
-                        <?php endforeach; ?>
+                <?php $quiz_unlocked = in_array($task['status'], ['REVIEW', 'REWORK']); ?>
+                <div class="p-3 rounded" style="background:rgba(124,58,237,.06);border:1px solid rgba(124,58,237,.2);border-radius:10px;">
+                    <div class="d-flex align-items-center gap-2 mb-2">
+                        <i class="bi bi-mortarboard-fill" style="color:#7c3aed;font-size:1.1rem;"></i>
+                        <span class="fw-semibold small" style="color:#7c3aed;">Quiz Required to Complete This Task</span>
                     </div>
-                    <?php endforeach; ?>
-                    <button class="btn w-100 fw-semibold" style="background:#7c3aed;color:#fff;border-radius:8px;">
-                        <i class="bi bi-send me-1"></i>Submit Answers
+                    <div class="small mb-3" style="color:var(--text-muted);">
+                        <?php if ($quiz_unlocked): ?>
+                            Answer all questions correctly to finish this task.
+                            You need <strong><?= $task['learning_pass_pct'] ?>%</strong> to pass
+                            (<?= count($quiz_questions) ?> question<?= count($quiz_questions) > 1 ? 's' : '' ?>).
+                        <?php else: ?>
+                            Read the learning material above, then click <strong>Submit for Review</strong> to unlock the quiz.
+                            You need <strong><?= $task['learning_pass_pct'] ?>%</strong> to pass
+                            (<?= count($quiz_questions) ?> question<?= count($quiz_questions) > 1 ? 's' : '' ?>).
+                        <?php endif; ?>
+                    </div>
+                    <?php if ($quiz_unlocked): ?>
+                    <button type="button" class="btn w-100 fw-semibold"
+                            style="background:#7c3aed;color:#fff;border-radius:8px;"
+                            data-bs-toggle="modal" data-bs-target="#learningQuizModal">
+                        <i class="bi bi-pencil-square me-1"></i>
+                        <?= $hadFailedAttempt ? 'Retry Quiz' : 'Take Quiz' ?>
                     </button>
-                </form>
+                    <?php else: ?>
+                    <button type="button" class="btn w-100 fw-semibold" disabled
+                            style="background:#a78bfa;color:#fff;border-radius:8px;opacity:.6;cursor:not-allowed;">
+                        <i class="bi bi-lock-fill me-1"></i>Quiz Locked — Submit for Review First
+                    </button>
+                    <?php endif; ?>
+                </div>
             <?php endif; ?>
 
             <?php elseif ($task['is_learning_task'] && !$task['quiz_required']): ?>
             <div class="small p-2 rounded" style="color:var(--text-muted);background:var(--body-bg);border:1px solid var(--card-bdr);">
                 <i class="bi bi-info-circle me-1"></i>Read the material above. TL will add quiz questions and review your completion.
-            </div>
-            <?php endif; ?>
-
-            <?php if ($task['quiz_required'] && !$employee_passed && !$quiz_pending_tl && $task['status'] !== 'DONE'): ?>
-            <div class="mt-3 small p-2 rounded d-flex align-items-center gap-2" style="background:#fef9c3;border:1px solid #fde047;color:#854d0e;">
-                <i class="bi bi-lock-fill"></i> Complete and pass the quiz to unlock task completion.
             </div>
             <?php endif; ?>
 
@@ -888,8 +999,259 @@ include 'header.php';
         </div>
     </div>
 
-    <?php if ($is_tl_local): ?>
-    <!-- TL: Review pending quiz attempts for this task -->
+    <?php if ($is_learning && $task['quiz_required'] && $quiz_questions && !$employee_passed && !$quiz_pending_tl && in_array($task['status'], ['REVIEW','REWORK'])): ?>
+    <?php $totalQ = count($quiz_questions); ?>
+    <!-- Quiz Modal — step-by-step, one question at a time -->
+    <div class="modal fade" id="learningQuizModal" tabindex="-1"
+         data-bs-backdrop="static" data-bs-keyboard="false" aria-labelledby="quizModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-lg modal-dialog-scrollable">
+            <div class="modal-content" style="border-radius:16px;overflow:hidden;">
+
+                <!-- Header with live progress bar -->
+                <div class="modal-header border-0 pb-3 px-4 pt-4"
+                     style="background:linear-gradient(135deg,#7c3aed,#5b21b6);color:#fff;flex-direction:column;align-items:stretch;">
+                    <div class="d-flex justify-content-between align-items-start mb-3">
+                        <div>
+                            <h5 class="modal-title fw-white mb-0" id="quizModalLabel">
+                                <i class="bi bi-mortarboard-fill me-2"></i>Quiz
+                                <?php if (!empty($badge_info)): ?>
+                                <span class="ms-1" style="font-size:1.1rem;" title="<?= sanitize($badge_info['name']) ?>"><?= sanitize($badge_info['icon']) ?></span>
+                                <?php endif; ?>
+                            </h5>
+                            <p class="small mb-0 mt-1 opacity-75">Need <?= $task['learning_pass_pct'] ?>% to pass</p>
+                        </div>
+                        <button type="button" class="btn-close btn-close-white flex-shrink-0" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <!-- Progress -->
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <span id="qStepLabel" class="small fw-grey" style="opacity:.9;">
+                            Question 1 of <?= $totalQ ?>
+                        </span>
+                        <span id="qStepPct" class="small" style="opacity:.75;">
+                            <?= $totalQ > 1 ? '0%' : '100%' ?>
+                        </span>
+                    </div>
+                    <div class="rounded-pill overflow-hidden" style="height:7px;background:rgba(255,255,255,.25);">
+                        <div id="qProgressBar" class="rounded-pill"
+                             style="height:100%;background:#fff;width:<?= $totalQ > 1 ? round(100/$totalQ) : 100 ?>%;transition:width .35s ease;"></div>
+                    </div>
+                </div>
+
+                <!-- Body: one step visible at a time -->
+                <div class="modal-body p-4">
+                    <div id="quizFormSection">
+                        <form id="learningQuizForm">
+                            <input type="hidden" name="action" value="submit_quiz">
+                            <input type="hidden" name="_ajax" value="1">
+                            <?php foreach ($quiz_questions as $qi => $q): ?>
+                            <?php $opts = json_decode($q['options'], true) ?? []; ?>
+                            <div class="quiz-step" data-step="<?= $qi ?>"<?= $qi > 0 ? ' style="display:none;"' : '' ?>>
+                                <p class="small text-muted mb-3">Select one answer and click Next.</p>
+                                <div class="p-3 rounded mb-1" style="background:var(--body-bg);border:1px solid var(--card-bdr);border-radius:12px;">
+                                    <div class="fw-semibold mb-3" style="color:var(--text-primary);font-size:.95rem;">
+                                        <?= sanitize($q['question']) ?>
+                                    </div>
+                                    <?php foreach ($opts as $oi => $opt): ?>
+                                    <label class="quiz-option d-flex align-items-center gap-3 p-2 rounded mb-2"
+                                           for="qm<?= $q['id'] ?>o<?= $oi ?>"
+                                           style="cursor:pointer;border:1.5px solid var(--card-bdr);border-radius:8px;transition:border-color .15s,background .15s;">
+                                        <input class="form-check-input flex-shrink-0 m-0" type="radio"
+                                               name="q_<?= $q['id'] ?>" value="<?= $oi ?>"
+                                               id="qm<?= $q['id'] ?>o<?= $oi ?>">
+                                        <span class="small"><?= sanitize($opt) ?></span>
+                                    </label>
+                                    <?php endforeach; ?>
+                                </div>
+                                <div class="quiz-step-err text-danger small mt-2" style="display:none;">
+                                    <i class="bi bi-exclamation-circle me-1"></i>Please select an answer to continue.
+                                </div>
+                            </div>
+                            <?php endforeach; ?>
+                        </form>
+                    </div>
+
+                    <!-- Result section -->
+                    <div id="quizResultSection" class="text-center py-5" style="display:none;">
+                        <div id="quizResultEmoji" style="font-size:3.5rem;line-height:1;" class="mb-3"></div>
+                        <div id="quizResultTitle" class="fw-bold fs-4 mb-2"></div>
+                        <div id="quizResultScore" class="fs-5 mb-2"></div>
+                        <div id="quizResultMsg" class="text-muted small mb-4"></div>
+                        <div id="quizResultActions"></div>
+                    </div>
+                </div>
+
+                <!-- Footer: Prev / Next / Submit -->
+                <div class="modal-footer border-0 px-4 pb-4 pt-0 justify-content-between" id="quizModalFooter">
+                    <button type="button" id="quizPrevBtn" class="btn btn-outline-secondary btn-sm px-3"
+                            style="border-radius:8px;display:none;">
+                        <i class="bi bi-arrow-left me-1"></i>Previous
+                    </button>
+                    <div class="ms-auto d-flex gap-2">
+                        <button type="button" class="btn btn-outline-secondary btn-sm px-3"
+                                style="border-radius:8px;" data-bs-dismiss="modal">Cancel</button>
+                        <button type="button" id="quizNextBtn" class="btn fw-semibold px-4"
+                                style="background:#7c3aed;color:#fff;border-radius:8px;<?= $totalQ === 1 ? 'display:none;' : '' ?>">
+                            Next <i class="bi bi-arrow-right ms-1"></i>
+                        </button>
+                        <button type="button" id="quizSubmitBtn" class="btn fw-semibold px-4"
+                                style="background:#7c3aed;color:#fff;border-radius:8px;<?= $totalQ > 1 ? 'display:none;' : '' ?>">
+                            <i class="bi bi-send me-1"></i>Submit
+                        </button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <style>
+    .quiz-option:has(input:checked) { border-color:#7c3aed !important; background:rgba(124,58,237,.06); }
+    .quiz-option:hover { border-color:#a78bfa; background:rgba(124,58,237,.03); }
+    </style>
+
+    <script>
+    (function () {
+        const TOTAL     = <?= $totalQ ?>;
+        const steps     = Array.from(document.querySelectorAll('.quiz-step'));
+        const form      = document.getElementById('learningQuizForm');
+        const formSec   = document.getElementById('quizFormSection');
+        const resSec    = document.getElementById('quizResultSection');
+        const footer    = document.getElementById('quizModalFooter');
+        const prevBtn   = document.getElementById('quizPrevBtn');
+        const nextBtn   = document.getElementById('quizNextBtn');
+        const submitBtn = document.getElementById('quizSubmitBtn');
+        const progBar   = document.getElementById('qProgressBar');
+        const stepLabel = document.getElementById('qStepLabel');
+        const stepPct   = document.getElementById('qStepPct');
+
+        let current = 0;
+
+        function refreshUI() {
+            const pct = Math.round(((current + 1) / TOTAL) * 100);
+            progBar.style.width  = pct + '%';
+            stepLabel.textContent = `Question ${current + 1} of ${TOTAL}`;
+            stepPct.textContent   = pct + '%';
+            prevBtn.style.display   = current > 0 ? '' : 'none';
+            nextBtn.style.display   = current < TOTAL - 1 ? '' : 'none';
+            submitBtn.style.display = current === TOTAL - 1 ? '' : 'none';
+        }
+
+        function goTo(n) {
+            steps[current].style.display = 'none';
+            steps[current].querySelector('.quiz-step-err').style.display = 'none';
+            current = n;
+            steps[current].style.display = '';
+            refreshUI();
+        }
+
+        function currentAnswered() {
+            const radios = steps[current].querySelectorAll('input[type=radio]');
+            return radios.length === 0 || !!steps[current].querySelector('input[type=radio]:checked');
+        }
+
+        nextBtn.addEventListener('click', function () {
+            if (!currentAnswered()) {
+                steps[current].querySelector('.quiz-step-err').style.display = '';
+                return;
+            }
+            goTo(current + 1);
+        });
+
+        prevBtn.addEventListener('click', function () {
+            if (current > 0) goTo(current - 1);
+        });
+
+        submitBtn.addEventListener('click', async function () {
+            if (!currentAnswered()) {
+                steps[current].querySelector('.quiz-step-err').style.display = '';
+                return;
+            }
+
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Submitting…';
+
+            try {
+                const fd  = new FormData(form);
+                const res = await fetch('task_detail.php?id=<?= $id ?>', { method: 'POST', body: fd });
+                if (!res.ok) throw new Error('Server error');
+                const data = await res.json();
+
+                if (data.error) {
+                    submitBtn.disabled = false;
+                    submitBtn.innerHTML = '<i class="bi bi-send me-1"></i>Submit';
+                    steps[current].querySelector('.quiz-step-err').textContent = data.error;
+                    steps[current].querySelector('.quiz-step-err').style.display = '';
+                    return;
+                }
+
+                formSec.style.display = 'none';
+                footer.style.display  = 'none';
+                resSec.style.display  = '';
+
+                if (data.passed) {
+                    progBar.style.width = '100%';
+                    stepLabel.textContent = 'Completed!';
+                    stepPct.textContent   = '100%';
+                    document.getElementById('quizResultEmoji').textContent = '🎉';
+                    document.getElementById('quizResultTitle').textContent  = 'Quiz Passed!';
+                    document.getElementById('quizResultTitle').style.color  = '#166534';
+                    document.getElementById('quizResultScore').innerHTML    = `Score: <strong>${data.score}%</strong>`;
+                    document.getElementById('quizResultMsg').textContent    = data.pending_tl
+                        ? 'Your answers have been submitted and are awaiting TL review.'
+                        : 'Great work! This task is now marked as complete.';
+                    document.getElementById('quizResultActions').innerHTML  =
+                        '<div class="spinner-border spinner-border-sm text-success me-1"></div> <span class="small text-muted">Reloading…</span>';
+                    setTimeout(() => window.location.reload(), 2000);
+                } else {
+                    document.getElementById('quizResultEmoji').textContent = '😔';
+                    document.getElementById('quizResultTitle').textContent  = 'Not quite there';
+                    document.getElementById('quizResultTitle').style.color  = '#dc2626';
+                    document.getElementById('quizResultScore').innerHTML    = `Score: <strong>${data.score}%</strong> — need ${data.pass_mark}%`;
+                    document.getElementById('quizResultMsg').textContent    = 'Review the material and try again.';
+                    document.getElementById('quizResultActions').innerHTML  =
+                        '<button class="btn btn-outline-danger px-4" id="quizRetryBtn"><i class="bi bi-arrow-repeat me-1"></i>Try Again</button>';
+                    document.getElementById('quizRetryBtn').addEventListener('click', function () {
+                        form.reset();
+                        steps.forEach((s, i) => { s.style.display = i === 0 ? '' : 'none'; });
+                        current = 0;
+                        resSec.style.display  = 'none';
+                        formSec.style.display = '';
+                        footer.style.display  = '';
+                        submitBtn.disabled    = false;
+                        submitBtn.innerHTML   = '<i class="bi bi-send me-1"></i>Submit';
+                        document.getElementById('quizResultActions').innerHTML = '';
+                        refreshUI();
+                    });
+                }
+            } catch (err) {
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = '<i class="bi bi-send me-1"></i>Submit';
+                steps[current].querySelector('.quiz-step-err').textContent = 'Something went wrong. Please try again.';
+                steps[current].querySelector('.quiz-step-err').style.display = '';
+            }
+        });
+
+        // Full reset when modal is (re)opened
+        document.getElementById('learningQuizModal').addEventListener('show.bs.modal', function () {
+            form.reset();
+            steps.forEach((s, i) => { s.style.display = i === 0 ? '' : 'none'; });
+            steps.forEach(s => { s.querySelector('.quiz-step-err').style.display = 'none'; });
+            current = 0;
+            resSec.style.display  = 'none';
+            formSec.style.display = '';
+            footer.style.display  = '';
+            submitBtn.disabled    = false;
+            submitBtn.innerHTML   = '<i class="bi bi-send me-1"></i>Submit';
+            refreshUI();
+        });
+
+        refreshUI();
+    })();
+    </script>
+    <?php endif; ?>
+
+    <?php if ($is_tl_local && !empty($task['needs_approval'])): ?>
+    <!-- TL: Review pending quiz attempts (only for tasks that require approval) -->
     <?php
     $pending_attempts = $conn->prepare("
         SELECT qa.*, e.name as emp_name, u.name as user_name
@@ -1287,6 +1649,62 @@ include 'header.php';
 </div>
 
 </div>
+
+<?php if ($is_learning && !empty($task['quiz_required']) && !$employee_passed): ?>
+<!-- Quiz Required Error Modal (intercepts any attempt to mark done before quiz is passed) -->
+<div class="modal fade" id="quizBlockModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered" style="max-width:400px;">
+        <div class="modal-content" style="border-radius:16px;border:none;box-shadow:0 20px 60px rgba(0,0,0,.18);">
+            <div class="modal-body px-4 pt-4 pb-3 text-center">
+                <div style="width:60px;height:60px;background:#f5f3ff;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 16px;">
+                    <i class="bi bi-mortarboard-fill" style="font-size:1.6rem;color:#7c3aed;"></i>
+                </div>
+                <h6 class="fw-bold mb-2" style="font-size:1.05rem;">Quiz Not Completed</h6>
+                <p class="text-muted mb-0" style="font-size:.84rem;" id="quizBlockMsg">
+                    <?php if (in_array($task['status'], ['REVIEW','REWORK'])): ?>
+                        You must <strong>pass the quiz</strong> below before this task can be marked as done.
+                    <?php else: ?>
+                        First click <strong>"Submit for Review"</strong> to complete the learning, then take the quiz to finish this task.
+                    <?php endif; ?>
+                </p>
+            </div>
+            <div class="modal-footer border-0 px-4 pb-4 pt-1 d-flex gap-2 justify-content-center">
+                <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal"
+                        style="border-radius:8px;padding:7px 22px;">OK</button>
+                <?php if (in_array($task['status'], ['REVIEW','REWORK'])): ?>
+                <button type="button" class="btn btn-sm fw-semibold" data-bs-dismiss="modal"
+                        onclick="bootstrap.Modal.getOrCreateInstance(document.getElementById('learningQuizModal')).show()"
+                        style="background:#7c3aed;color:#fff;border-radius:8px;padding:7px 22px;">
+                    <i class="bi bi-pencil-square me-1"></i>Take Quiz
+                </button>
+                <?php endif; ?>
+            </div>
+        </div>
+    </div>
+</div>
+<script>
+// Intercept any "Mark Done" form submission and block it if quiz not yet passed
+document.addEventListener('DOMContentLoaded', function () {
+    document.querySelectorAll('form input[name="new_status"][value="DONE"]').forEach(function (inp) {
+        inp.closest('form').addEventListener('submit', function (e) {
+            e.preventDefault();
+            bootstrap.Modal.getOrCreateInstance(document.getElementById('quizBlockModal')).show();
+        });
+    });
+});
+</script>
+<?php endif; ?>
+
+<?php if ($is_learning && !$employee_passed && !$quiz_pending_tl): ?>
+<script>
+window.addEventListener('load', function () {
+    if (new URLSearchParams(window.location.search).get('open_quiz') === '1') {
+        var _qm = document.getElementById('learningQuizModal');
+        if (_qm) bootstrap.Modal.getOrCreateInstance(_qm).show();
+    }
+});
+</script>
+<?php endif; ?>
 
 <?php include 'footer.php'; ?>
 .Value

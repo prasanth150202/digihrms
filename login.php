@@ -24,6 +24,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'email' => $user['email'],
                 'role'  => $user['role'],
             ];
+            // If "Remember me" is checked, replace the session cookie with a 30-day persistent one
+            if (!empty($_POST['remember_me'])) {
+                setcookie(session_name(), session_id(), [
+                    'expires'  => time() + HRMS_SESS_LIFETIME,
+                    'path'     => '/',
+                    'httponly' => true,
+                    'samesite' => 'Lax',
+                    'secure'   => isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on',
+                ]);
+            }
             header("Location: index.php");
             exit;
         } else {
@@ -82,6 +92,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 <span class="input-group-text"><i class="bi bi-lock text-muted"></i></span>
                 <input type="password" name="password" id="passwordField" class="form-control" placeholder="••••••••" required>
                 <button type="button" class="btn btn-outline-secondary border-start-0" onclick="togglePwd()"><i class="bi bi-eye" id="eyeIcon"></i></button>
+            </div>
+        </div>
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <div class="form-check mb-0">
+                <input class="form-check-input" type="checkbox" name="remember_me" id="rememberMe" value="1">
+                <label class="form-check-label small text-muted" for="rememberMe">Remember Me</label>
             </div>
         </div>
         <button type="submit" class="btn btn-login btn-primary w-100 text-white">

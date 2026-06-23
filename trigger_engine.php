@@ -480,7 +480,6 @@ function _executeTaskCardNode(PDO $conn, int $runId, string $nodeKey, array $dat
             $badgeIcon       = trim($task['badge_icon'] ?? '🏅');
             $learningMaterial = trim($task['learning_material'] ?? '');
             $passPct         = (int)($task['pass_pct'] ?? 80);
-            $quizRequired    = $passPct > 0 ? 1 : 0;
 
             // Upsert badge by name to avoid duplicates across runs
             $existBadge = $conn->prepare("SELECT id FROM hrms_badges WHERE name=? LIMIT 1");
@@ -491,6 +490,24 @@ function _executeTaskCardNode(PDO $conn, int $runId, string $nodeKey, array $dat
                      ->execute([$badgeName, $badgeIcon, $actorId ?: 0]);
                 $badgeId = (int)$conn->lastInsertId();
             }
+
+            // Copy quiz questions first — quiz_required is only 1 if questions are actually inserted
+            $quizInserted = 0;
+            if (!empty($task['quiz_questions']) && is_array($task['quiz_questions'])) {
+                $sortOrder = 1;
+                foreach ($task['quiz_questions'] as $qq) {
+                    $qqText    = trim($qq['question'] ?? '');
+                    $qqOptions = array_values(array_filter((array)($qq['options'] ?? [])));
+                    $qqCorrect = (int)($qq['correct_idx'] ?? 0);
+                    if ($qqText && count($qqOptions) >= 2) {
+                        $conn->prepare("INSERT INTO hrms_task_quiz (task_id, question, options, correct_idx, sort_order) VALUES (?,?,?,?,?)")
+                             ->execute([$taskId, $qqText, json_encode($qqOptions), $qqCorrect, $sortOrder]);
+                        $sortOrder++;
+                        $quizInserted++;
+                    }
+                }
+            }
+            $quizRequired = ($passPct > 0 && $quizInserted > 0) ? 1 : 0;
 
             $conn->prepare("UPDATE tasks SET is_learning_task=1, learning_badge_id=?, learning_material=?, learning_pass_pct=?, quiz_required=? WHERE id=?")
                  ->execute([$badgeId, $learningMaterial, $passPct, $quizRequired, $taskId]);

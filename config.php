@@ -5,13 +5,7 @@ if (file_exists(__DIR__ . '/vendor/autoload.php')) {
 
 date_default_timezone_set('Asia/Kolkata');
 
-ini_set('session.cookie_httponly', 1);
-ini_set('session.cookie_secure', isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 1 : 0);
-ini_set('session.cookie_samesite', 'Lax');
-ini_set('session.use_strict_mode', 1);
-session_start();
-
-// Load .env from the same directory
+// ── .env loader (runs before DB so credentials are available) ─────────────────
 (function () {
     $envFile = __DIR__ . '/.env';
     if (!file_exists($envFile)) return;
@@ -23,6 +17,7 @@ session_start();
     }
 })();
 
+// ── Database connection ───────────────────────────────────────────────────────
 $host     = $_ENV['DB_HOST'] ?? "193.203.184.87";
 $db_name  = $_ENV['DB_NAME'] ?? "u218702675_hrms";
 $username = $_ENV['DB_USER'] ?? "u218702675_hrms";
@@ -35,6 +30,65 @@ try {
 } catch (PDOException $e) {
     die("<div style='font-family:sans-serif;padding:40px;color:red;'>DB Connection Failed: " . $e->getMessage() . "</div>");
 }
+
+// ── Database-backed session handler ──────────────────────────────────────────
+// Stores sessions in MySQL instead of /tmp — fixes the shared-hosting GC race
+// where Hostinger's cron deletes session files before gc_maxlifetime expires.
+define('HRMS_SESS_LIFETIME', 2592000); // 30 days
+
+if (!class_exists('HrmsDbSession')) {
+    class HrmsDbSession implements SessionHandlerInterface {
+        public function __construct(private PDO $db, private int $ttl) {}
+        public function open($path, $name): bool { return true; }
+        public function close(): bool            { return true; }
+        public function read($id): string|false {
+            try {
+                $s = $this->db->prepare("SELECT data FROM hrms_sessions WHERE id=? AND expires_at > NOW() LIMIT 1");
+                $s->execute([$id]);
+                return (string)($s->fetchColumn() ?: '');
+            } catch (Exception $e) { return ''; }
+        }
+        public function write($id, $data): bool {
+            try {
+                $this->db->prepare(
+                    "INSERT INTO hrms_sessions (id, data, expires_at) VALUES (?,?,DATE_ADD(NOW(),INTERVAL ? SECOND))
+                     ON DUPLICATE KEY UPDATE data=VALUES(data), expires_at=VALUES(expires_at)"
+                )->execute([$id, $data, $this->ttl]);
+                return true;
+            } catch (Exception $e) { return false; }
+        }
+        public function destroy($id): bool {
+            try { $this->db->prepare("DELETE FROM hrms_sessions WHERE id=?")->execute([$id]); return true; }
+            catch (Exception $e) { return false; }
+        }
+        public function gc($max_lifetime): int|false {
+            try { $this->db->exec("DELETE FROM hrms_sessions WHERE expires_at < NOW()"); return true; }
+            catch (Exception $e) { return false; }
+        }
+    }
+}
+
+// Auto-create sessions table, then register the handler
+try {
+    $conn->exec("CREATE TABLE IF NOT EXISTS hrms_sessions (
+        id         VARCHAR(128) NOT NULL PRIMARY KEY,
+        data       MEDIUMTEXT   NOT NULL,
+        expires_at DATETIME     NOT NULL,
+        INDEX idx_expires (expires_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    session_set_save_handler(new HrmsDbSession($conn, HRMS_SESS_LIFETIME), true);
+} catch (PDOException $e) {
+    // DB unavailable — fall back to file sessions (may GC, but app stays functional)
+}
+
+// Apply cookie settings before session_start()
+ini_set('session.cookie_httponly', 1);
+ini_set('session.cookie_secure',   isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 1 : 0);
+ini_set('session.cookie_samesite', 'Lax');
+ini_set('session.use_strict_mode', 1);
+ini_set('session.gc_maxlifetime',  HRMS_SESS_LIFETIME);
+// cookie_lifetime = 0 (session cookie) by default; login.php sets it to 30 days when "Remember me" is checked
+session_start();
 
 // ── DigiOps DB connection (for cross-system features: My Points, reverse task sync) ──
 function digiops_db(): ?PDO {

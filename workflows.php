@@ -604,6 +604,51 @@ include 'header.php';
 </div>
 </div>
 
+<!-- ── Quiz Builder Modal ──────────────────────────────────────────────── -->
+<div class="modal fade" id="quizBuilderModal" tabindex="-1" aria-labelledby="quizBuilderModalLabel" aria-hidden="true">
+<div class="modal-dialog modal-lg modal-dialog-centered">
+<div class="modal-content" style="border-radius:16px;border:none;box-shadow:0 20px 60px rgba(0,0,0,.15);background:var(--card-bg);">
+    <div class="modal-header border-0 pb-0 pt-4 px-4">
+        <div>
+            <h5 class="modal-title fw-bold" id="quizBuilderModalLabel"><i class="bi bi-patch-question-fill me-2" style="color:#7c3aed;"></i>Quiz Builder</h5>
+            <p class="text-muted small mb-0 mt-1">Add questions that the assignee must answer before marking this task as done.</p>
+        </div>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+    </div>
+    <div class="modal-body px-4 py-3">
+        <!-- Existing questions list -->
+        <div id="quiz-questions-list" class="mb-3"></div>
+
+        <!-- Add new question form -->
+        <div class="p-3 rounded" style="background:var(--body-bg);border:1px dashed #7c3aed44;">
+            <div class="fw-semibold small mb-2" style="color:#7c3aed;"><i class="bi bi-plus-circle me-1"></i>New Question</div>
+            <div class="mb-2">
+                <label class="form-label small fw-semibold mb-1">Question</label>
+                <input type="text" id="qb-question" class="form-control form-control-sm" placeholder="e.g. What is Shopify's primary use case?">
+            </div>
+            <div class="mb-2">
+                <label class="form-label small fw-semibold mb-1">Options <span class="fw-normal text-muted">(one per line, min 2)</span></label>
+                <textarea id="qb-options" class="form-control form-control-sm" rows="4" placeholder="E-commerce platform&#10;Email marketing tool&#10;CRM software&#10;Social network"></textarea>
+            </div>
+            <div class="mb-3">
+                <label class="form-label small fw-semibold mb-1">Correct option # <span class="fw-normal text-muted">(1 = first option)</span></label>
+                <input type="number" id="qb-correct" class="form-control form-control-sm" min="1" value="1" style="width:90px;">
+            </div>
+            <button type="button" class="btn btn-sm" style="background:#7c3aed;color:#fff;font-weight:600;border-radius:7px;" onclick="quizBuilderAddQ()">
+                <i class="bi bi-plus-lg me-1"></i>Add Question
+            </button>
+        </div>
+    </div>
+    <div class="modal-footer border-0 px-4 pb-4 pt-2 gap-2">
+        <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-sm" style="background:#7c3aed;color:#fff;font-weight:600;border-radius:7px;" onclick="quizBuilderSave()">
+            <i class="bi bi-check-lg me-1"></i>Save Quiz
+        </button>
+    </div>
+</div>
+</div>
+</div>
+
 <!-- ── Canvas (fullscreen overlay) ─────────────────────────────────────── -->
 <div id="canvas-area">
     <div id="canvas-topbar">
@@ -890,6 +935,9 @@ function buildTaskNode(nodeId, data) {
 }
 
 function buildTaskItem(nodeId, idx, t = {}) {
+    const quizQs    = t.quiz_questions || [];
+    const quizCount = quizQs.length;
+    const quizLabel = quizCount === 1 ? '1 question' : quizCount + ' questions';
     return `<div class="task-item" id="ti-${nodeId}-${idx}">
         <button class="remove-task" onclick="removeTaskItem('${nodeId}',${idx})" title="Remove"><i class="bi bi-x"></i></button>
         <label>Title</label>
@@ -932,6 +980,14 @@ function buildTaskItem(nodeId, idx, t = {}) {
             <textarea class="ti-learning-material" placeholder="https://... or paste content here" style="min-height:50px;">${escAttr(t.learning_material||'')}</textarea>
             <label>Quiz Pass % <span style="font-weight:400;color:var(--text-muted);">(0 = no quiz, TL reviews answers)</span></label>
             <input type="number" class="ti-pass-pct" min="0" max="100" value="${t.pass_pct||80}" style="width:70px;">
+            <input type="hidden" class="ti-quiz-questions" value="${escAttr(JSON.stringify(quizQs))}">
+            <div style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                <button type="button" onclick="openQuizModal('${nodeId}',${idx})"
+                    style="background:#7c3aed;color:#fff;border:none;border-radius:6px;padding:4px 10px;font-size:11px;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:4px;">
+                    <i class="bi bi-patch-question-fill"></i> Add Quiz
+                </button>
+                <span class="ti-quiz-count" style="font-size:11px;color:#7c3aed;font-weight:600;">${quizCount > 0 ? quizLabel : 'No questions yet'}</span>
+            </div>
         </div>
     </div>`;
 }
@@ -1045,6 +1101,8 @@ function extractTasks(nodeId) {
     if (!el) return [];
     return Array.from(el.querySelectorAll('.task-item')).map(item => {
         const assignees = Array.from(item.querySelectorAll('.ar-value')).map(i => i.value).filter(v => v);
+        let quizQuestions = [];
+        try { quizQuestions = JSON.parse(item.querySelector('.ti-quiz-questions')?.value || '[]'); } catch(e) {}
         return {
             title: item.querySelector('.ti-title')?.value || '',
             description: item.querySelector('.ti-desc')?.value || '',
@@ -1057,6 +1115,7 @@ function extractTasks(nodeId) {
             badge_icon:          item.querySelector('.ti-badge-icon')?.value     || '🏅',
             learning_material:   item.querySelector('.ti-learning-material')?.value || '',
             pass_pct:            parseInt(item.querySelector('.ti-pass-pct')?.value || '80'),
+            quiz_questions:      quizQuestions,
         };
     });
 }
@@ -1390,6 +1449,78 @@ function openCreateModal() {
 // ── Utils ─────────────────────────────────────────────────────────────────
 function setStatus(msg) { document.getElementById('canvas-status').textContent = msg; }
 function escAttr(str) { return String(str).replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+function escHtml(str) { return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+// ── Quiz Builder ───────────────────────────────────────────────────────────
+let _qbNodeId  = null;
+let _qbTaskIdx = null;
+let _qbQuestions = [];
+
+function openQuizModal(nodeId, idx) {
+    _qbNodeId  = nodeId;
+    _qbTaskIdx = idx;
+    const input = document.querySelector(`#ti-${nodeId}-${idx} .ti-quiz-questions`);
+    try { _qbQuestions = JSON.parse(input?.value || '[]'); } catch(e) { _qbQuestions = []; }
+    document.getElementById('qb-question').value = '';
+    document.getElementById('qb-options').value  = '';
+    document.getElementById('qb-correct').value  = '1';
+    _qbRender();
+    new bootstrap.Modal(document.getElementById('quizBuilderModal')).show();
+}
+
+function _qbRender() {
+    const list = document.getElementById('quiz-questions-list');
+    if (!_qbQuestions.length) {
+        list.innerHTML = '<p class="text-muted small text-center py-2 mb-0">No questions yet. Add one below.</p>';
+        return;
+    }
+    list.innerHTML = _qbQuestions.map((q, i) => `
+        <div class="d-flex align-items-start mb-2 p-2 rounded" style="background:var(--body-bg);border:1px solid var(--card-bdr);">
+            <div class="flex-grow-1">
+                <div class="fw-semibold small">${i+1}. ${escHtml(q.question)}</div>
+                <div class="mt-1 d-flex flex-wrap gap-2">
+                    ${(q.options||[]).map((o,oi) => `<span class="small">${oi===q.correct_idx?'<span style="color:#16a34a;">&#10003;</span>':'<span class="text-muted">○</span>'} ${escHtml(o)}</span>`).join('')}
+                </div>
+            </div>
+            <button type="button" class="btn btn-sm btn-outline-danger ms-2 flex-shrink-0"
+                style="font-size:11px;padding:2px 6px;border-radius:6px;" onclick="_qbRemove(${i})">
+                <i class="bi bi-trash"></i>
+            </button>
+        </div>
+    `).join('');
+}
+
+function quizBuilderAddQ() {
+    const question = document.getElementById('qb-question').value.trim();
+    const options  = document.getElementById('qb-options').value.split('\n').map(s => s.trim()).filter(Boolean);
+    const correctNum = parseInt(document.getElementById('qb-correct').value) || 1;
+    const correctIdx = Math.max(0, Math.min(correctNum - 1, options.length - 1));
+    if (!question) { alert('Please enter a question.'); return; }
+    if (options.length < 2) { alert('Please enter at least 2 options, one per line.'); return; }
+    _qbQuestions.push({ question, options, correct_idx: correctIdx });
+    _qbRender();
+    document.getElementById('qb-question').value = '';
+    document.getElementById('qb-options').value  = '';
+    document.getElementById('qb-correct').value  = '1';
+}
+
+function _qbRemove(idx) {
+    _qbQuestions.splice(idx, 1);
+    _qbRender();
+}
+
+function quizBuilderSave() {
+    const input = document.querySelector(`#ti-${_qbNodeId}-${_qbTaskIdx} .ti-quiz-questions`);
+    if (input) {
+        input.value = JSON.stringify(_qbQuestions);
+        const badge = document.querySelector(`#ti-${_qbNodeId}-${_qbTaskIdx} .ti-quiz-count`);
+        if (badge) {
+            const n = _qbQuestions.length;
+            badge.textContent = n === 0 ? 'No questions yet' : (n === 1 ? '1 question' : n + ' questions');
+        }
+    }
+    bootstrap.Modal.getInstance(document.getElementById('quizBuilderModal'))?.hide();
+}
 
 // ── Delete node ───────────────────────────────────────────────────────────
 function deleteNode(nodeId) {
