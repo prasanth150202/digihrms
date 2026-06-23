@@ -2122,6 +2122,21 @@ try {
             <?php endif; ?>
         </div>
         <?php endif; ?>
+        <?php
+        $show_fill_btn_k = $fill_url_k
+            && !$hr_view
+            && in_array($kst, ['TODO','IN_PROGRESS','REWORK'])
+            && ($t['assigned_to']==$uid || $t['assigned_by']==$uid);
+        ?>
+        <?php if ($show_fill_btn_k): ?>
+        <a href="<?= htmlspecialchars($fill_url_k) ?>" target="_blank"
+           style="display:flex;align-items:center;justify-content:center;gap:5px;margin-top:8px;
+                  background:#2563eb;color:#fff;border-radius:7px;padding:6px 10px;
+                  font-size:.75rem;font-weight:600;text-decoration:none;width:100%;">
+            <i class="bi bi-box-arrow-up-right" style="font-size:.75rem;"></i>
+            <?= $kst === 'REWORK' ? 'Resubmit Form' : 'Submit Form' ?>
+        </a>
+        <?php endif; ?>
         <div class="d-flex justify-content-between align-items-center mt-2" style="border-top:1px solid #f1f5f9;padding-top:7px;">
             <?php if ($t['assignee_name']): ?>
             <div class="d-flex align-items-center gap-1">
