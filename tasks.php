@@ -4268,10 +4268,13 @@ async function tmAjax(action, taskId, btn, extra) {
     } catch(e) { if (btn) { btn.disabled=false; btn.innerHTML=orig; } showToast('Network error', 'error'); }
 }
 
+let _taskCreateInFlight = false;
 async function submitCreateTask(btn) {
+    if (_taskCreateInFlight) return;
+    _taskCreateInFlight = true;
     const form = document.getElementById('createTaskForm');
     const title = form.querySelector('[name="title"]')?.value.trim();
-    if (!title) { showAlert('Task title is required.', 'warning', 'Missing Title'); return; }
+    if (!title) { _taskCreateInFlight = false; showAlert('Task title is required.', 'warning', 'Missing Title'); return; }
     const orig = btn.innerHTML;
     btn.disabled = true; btn.innerHTML = '<span class="hc-spinner"></span> Creating…';
     const fd = new FormData();
@@ -4284,16 +4287,17 @@ async function submitCreateTask(btn) {
     try {
         const r = await fetch('tasks.php', { method: 'POST', body: fd, credentials: 'same-origin' });
         const d = await r.json();
-        if (!d.ok) { showToast(d.error || 'Failed to create task', 'error'); btn.disabled=false; btn.innerHTML=orig; }
+        if (!d.ok) { _taskCreateInFlight=false; showToast(d.error || 'Failed to create task', 'error'); btn.disabled=false; btn.innerHTML=orig; }
         else {
             bootstrap.Modal.getInstance(document.getElementById('createModal'))?.hide();
             form.querySelectorAll('input[type=text],input[type=date],input[type=number],textarea').forEach(el => el.value='');
             form.querySelectorAll('select').forEach(el => el.selectedIndex=0);
             form.querySelectorAll('input[type=checkbox]').forEach(el => el.checked=false);
             btn.disabled=false; btn.innerHTML=orig;
+            _taskCreateInFlight=false;
             location.reload();
         }
-    } catch(e) { btn.disabled=false; btn.innerHTML=orig; showToast('Network error', 'error'); }
+    } catch(e) { _taskCreateInFlight=false; btn.disabled=false; btn.innerHTML=orig; showToast('Network error', 'error'); }
 }
 
 async function submitApproveRequest(btn) {

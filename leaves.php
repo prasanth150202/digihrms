@@ -10,6 +10,13 @@ try { $conn->exec("ALTER TABLE permission_requests ADD COLUMN tl_approved_by INT
 try { $conn->exec("ALTER TABLE permission_requests ADD COLUMN tl_approved_at DATETIME NULL DEFAULT NULL"); } catch (PDOException $e) {}
 // Extend status enum to include TL_APPROVED
 try { $conn->exec("ALTER TABLE permission_requests MODIFY COLUMN status ENUM('PENDING','TL_APPROVED','APPROVED','REJECTED') NOT NULL DEFAULT 'PENDING'"); } catch (PDOException $e) {}
+// ── Half-day leave support ──
+try { $conn->exec("ALTER TABLE leaves ADD COLUMN half_day TINYINT(1) NOT NULL DEFAULT 0"); } catch (PDOException $e) {}
+try { $conn->exec("ALTER TABLE leaves ADD COLUMN half_day_period VARCHAR(16) NULL DEFAULT NULL"); } catch (PDOException $e) {}
+try { $conn->exec("ALTER TABLE leaves MODIFY COLUMN days DECIMAL(5,1) NOT NULL DEFAULT 0"); } catch (PDOException $e) {}
+// ── Withdrawal approval tracking ──
+try { $conn->exec("ALTER TABLE leaves ADD COLUMN withdraw_prev_status VARCHAR(20) NULL DEFAULT NULL"); } catch (PDOException $e) {}
+try { $conn->exec("ALTER TABLE leaves MODIFY COLUMN status ENUM('PENDING','TL_APPROVED','APPROVED','REJECTED','REVOKED','WITHDRAWN','WITHDRAW_REQUESTED') NOT NULL DEFAULT 'PENDING'"); } catch (PDOException $e) {}
 
 // ── Leave approval chain ─────────────────────────────────
 if (isset($_GET['action'], $_GET['id']) && has_role('SUPER_ADMIN','HR_ADMIN','TEAM_LEAD')) {
@@ -78,6 +85,48 @@ if (isset($_GET['action'], $_GET['id']) && has_role('SUPER_ADMIN','HR_ADMIN','TE
             );
         }
         set_flash('danger', 'Leave rejected.');
+
+    } elseif ($act === 'approve_withdraw') {
+        $lv2 = $conn->prepare("SELECT withdraw_prev_status FROM leaves WHERE id=? AND status='WITHDRAW_REQUESTED' LIMIT 1");
+        $lv2->execute([$lid]);
+        $lv2 = $lv2->fetch();
+        if ($lv2) {
+            $prevSt   = $lv2['withdraw_prev_status'] ?? 'APPROVED';
+            $needsTl  = $prevSt === 'TL_APPROVED';
+            $canActW2 = ($needsTl && has_role('SUPER_ADMIN','HR_ADMIN','TEAM_LEAD'))
+                     || (!$needsTl && has_role('SUPER_ADMIN','HR_ADMIN'));
+            if ($canActW2) {
+                $conn->prepare("UPDATE leaves SET status='WITHDRAWN' WHERE id=?")->execute([$lid]);
+                if ($leafUserId) hrms_notify($conn, $leafUserId, 'leave_withdrawn',
+                    'Withdrawal approved', 'Your withdrawal request has been approved.', 'leaves.php');
+                set_flash('success', 'Withdrawal approved — leave marked as withdrawn.');
+            } else {
+                set_flash('danger', 'Access denied.');
+            }
+        } else {
+            set_flash('danger', 'No pending withdrawal request found.');
+        }
+
+    } elseif ($act === 'reject_withdraw') {
+        $lv3 = $conn->prepare("SELECT withdraw_prev_status FROM leaves WHERE id=? AND status='WITHDRAW_REQUESTED' LIMIT 1");
+        $lv3->execute([$lid]);
+        $lv3 = $lv3->fetch();
+        if ($lv3) {
+            $prevSt2  = $lv3['withdraw_prev_status'] ?? 'APPROVED';
+            $needsTl2 = $prevSt2 === 'TL_APPROVED';
+            $canActW3 = ($needsTl2 && has_role('SUPER_ADMIN','HR_ADMIN','TEAM_LEAD'))
+                     || (!$needsTl2 && has_role('SUPER_ADMIN','HR_ADMIN'));
+            if ($canActW3) {
+                $conn->prepare("UPDATE leaves SET status=?, withdraw_prev_status=NULL WHERE id=?")->execute([$prevSt2, $lid]);
+                if ($leafUserId) hrms_notify($conn, $leafUserId, 'leave_withdraw_rejected',
+                    'Withdrawal rejected', 'Your withdrawal request was rejected — leave remains active.', 'leaves.php');
+                set_flash('info', 'Withdrawal rejected — leave restored to previous status.');
+            } else {
+                set_flash('danger', 'Access denied.');
+            }
+        } else {
+            set_flash('danger', 'No pending withdrawal request found.');
+        }
     }
     header("Location: leaves.php"); exit;
 }
@@ -92,16 +141,48 @@ if (isset($_GET['action'], $_GET['id']) && $_GET['action'] === 'revoke') {
     $lv = $lv->fetch();
 
     $can_revoke = $lv
-        && $lv['eid'] == $lv['employee_id']           // own leave
+        && $lv['eid'] == $lv['employee_id']
         && in_array($lv['status'], ['PENDING','TL_APPROVED','APPROVED'])
-        && $lv['from_date'] > date('Y-m-d');           // hasn't started
+        && $lv['from_date'] > date('Y-m-d');
 
     if ($can_revoke) {
-        $conn->prepare("UPDATE leaves SET status='REVOKED' WHERE id=?")
-             ->execute([$lid]);
+        $conn->prepare("UPDATE leaves SET status='REVOKED' WHERE id=?")->execute([$lid]);
         set_flash('success', 'Leave revoked successfully.');
     } else {
         set_flash('danger', 'Cannot revoke — leave has already started or is not active.');
+    }
+    header("Location: leaves.php"); exit;
+}
+
+// ── Employee withdraw ──────────────────────────────────────
+// PENDING        → direct WITHDRAWN (no approval needed)
+// TL_APPROVED    → WITHDRAW_REQUESTED, TL must approve
+// APPROVED       → WITHDRAW_REQUESTED, HR must approve
+if (isset($_GET['action'], $_GET['id']) && $_GET['action'] === 'withdraw') {
+    $lid = (int)$_GET['id'];
+    $lv  = $conn->prepare("SELECT l.*, e.id as eid FROM leaves l
+                            LEFT JOIN employees e ON e.email=?
+                            WHERE l.id=?");
+    $lv->execute([$u['email'], $lid]);
+    $lv = $lv->fetch();
+
+    $can_withdraw = $lv
+        && $lv['eid'] == $lv['employee_id']
+        && in_array($lv['status'], ['PENDING','TL_APPROVED','APPROVED']);
+
+    if ($can_withdraw) {
+        if ($lv['status'] === 'PENDING') {
+            $conn->prepare("UPDATE leaves SET status='WITHDRAWN' WHERE id=?")->execute([$lid]);
+            set_flash('success', 'Leave withdrawn successfully.');
+        } else {
+            // TL_APPROVED → TL approves withdrawal; APPROVED → HR approves
+            $conn->prepare("UPDATE leaves SET status='WITHDRAW_REQUESTED', withdraw_prev_status=? WHERE id=?")
+                 ->execute([$lv['status'], $lid]);
+            $approver = $lv['status'] === 'TL_APPROVED' ? 'your Team Lead' : 'HR';
+            set_flash('success', "Withdrawal request submitted — awaiting approval from $approver.");
+        }
+    } else {
+        set_flash('danger', 'Cannot withdraw this leave request.');
     }
     header("Location: leaves.php"); exit;
 }
@@ -165,16 +246,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!$emp) {
         set_flash('danger', 'No employee record found for your account. Contact HR.');
     } else {
-        $from = $_POST['from_date'];
-        $to   = $_POST['to_date'];
-        $days = (int)((strtotime($to) - strtotime($from)) / 86400) + 1;
+        $from       = $_POST['from_date'];
+        $halfDay    = !empty($_POST['half_day']) ? 1 : 0;
+        $halfPeriod = $halfDay ? (in_array($_POST['half_day_period'] ?? '', ['first_half','second_half']) ? $_POST['half_day_period'] : 'first_half') : null;
+        $to         = $halfDay ? $from : $_POST['to_date'];
+        $days       = $halfDay ? 0.5 : ((int)((strtotime($to) - strtotime($from)) / 86400) + 1);
         // TLs skip the TL-approval step — their leave goes straight to HR
         $isTlApplying = has_role('TEAM_LEAD');
         $initStatus   = $isTlApplying ? 'TL_APPROVED' : 'PENDING';
         $tlApprovedBy = $isTlApplying ? $u['id'] : null;
         $tlApprovedAt = $isTlApplying ? date('Y-m-d H:i:s') : null;
-        $conn->prepare("INSERT INTO leaves (employee_id,leave_type,from_date,to_date,days,reason,status,tl_approved_by,tl_approved_at) VALUES (?,?,?,?,?,?,?,?,?)")
-             ->execute([$emp['id'], $_POST['leave_type'], $from, $to, $days, $_POST['reason'], $initStatus, $tlApprovedBy, $tlApprovedAt]);
+        $conn->prepare("INSERT INTO leaves (employee_id,leave_type,from_date,to_date,days,reason,status,tl_approved_by,tl_approved_at,half_day,half_day_period) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+             ->execute([$emp['id'], $_POST['leave_type'], $from, $to, $days, $_POST['reason'], $initStatus, $tlApprovedBy, $tlApprovedAt, $halfDay, $halfPeriod]);
         set_flash('success', $isTlApplying ? 'Leave submitted — awaiting HR approval.' : 'Leave application submitted.');
     }
     header("Location: leaves.php"); exit;
@@ -295,6 +378,8 @@ $lv_status = [
     'APPROVED'    => ['color' => 'success',   'label' => 'Approved'],
     'REJECTED'    => ['color' => 'danger',    'label' => 'Rejected'],
     'REVOKED'     => ['color' => 'secondary', 'label' => 'Revoked'],
+    'WITHDRAWN'          => ['color' => 'secondary', 'label' => 'Withdrawn'],
+    'WITHDRAW_REQUESTED' => ['color' => 'warning',   'label' => 'Withdraw Requested'],
 ];
 
 // Current user's employee id (for revoke button check)
@@ -388,21 +473,26 @@ include 'header.php';
                     <td class="ps-4" style="font-size:.85rem;"><?= sanitize($ml['leave_type']) ?></td>
                     <td style="font-size:.82rem;"><?= date('d M Y', strtotime($ml['from_date'])) ?></td>
                     <td style="font-size:.82rem;"><?= date('d M Y', strtotime($ml['to_date'])) ?></td>
-                    <td style="font-size:.82rem;"><?= $ml['days'] ?></td>
+                    <td style="font-size:.82rem;">
+                        <?php $mdv = (float)$ml['days']; echo $mdv == 0.5 ? '½ day' : ($mdv . ' day' . ($mdv > 1 ? 's' : '')); ?>
+                        <?php if (!empty($ml['half_day']) && !empty($ml['half_day_period'])): ?>
+                        <span class="badge ms-1" style="font-size:.65rem;background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;">
+                            <?= $ml['half_day_period'] === 'second_half' ? 'Second Half' : 'First Half' ?>
+                        </span>
+                        <?php endif; ?>
+                    </td>
                     <td style="font-size:.82rem;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="<?= sanitize($ml['reason']) ?>"><?= sanitize($ml['reason']) ?></td>
                     <td><span class="badge bg-<?= $ls['color'] ?> rounded-pill"><?= $ls['label'] ?></span></td>
                     <td>
                         <?php
-                        $tl_emp_record = isset($tl_emp_id) ? $tl_emp_id : null;
-                        $can_revoke_own = $tl_emp_record && $tl_emp_record == $ml['employee_id']
-                            && in_array($ml['status'], ['PENDING','TL_APPROVED','APPROVED'])
-                            && $ml['from_date'] > date('Y-m-d');
-                        if ($can_revoke_own): ?>
-                        <a href="?action=revoke&id=<?= $ml['id'] ?>"
-                           class="btn btn-sm btn-outline-warning py-0 px-2"
-                           onclick="return hConfirmSync(event,'Revoke this leave?')">
-                            <i class="bi bi-x-circle me-1"></i>Revoke
-                        </a>
+                        $can_withdraw_own = $my_emp_id && $my_emp_id == $ml['employee_id']
+                            && in_array($ml['status'], ['PENDING','TL_APPROVED','APPROVED']);
+                        if ($can_withdraw_own): ?>
+                        <button type="button"
+                                class="btn btn-sm btn-outline-danger py-0 px-2"
+                                onclick="openWithdrawModal(<?= $ml['id'] ?>, '<?= sanitize($ml['leave_type']) ?>', '<?= date('d M Y', strtotime($ml['from_date'])) ?>', '<?= date('d M Y', strtotime($ml['to_date'])) ?>', '<?= $ml['status'] ?>')">
+                            <i class="bi bi-arrow-counterclockwise me-1"></i>Withdraw
+                        </button>
                         <?php endif; ?>
                     </td>
                 </tr>
@@ -445,7 +535,12 @@ include 'header.php';
                     <td <?= $canEdit ? 'data-editable="select" data-table="leaves" data-id="'.$l['id'].'" data-field="leave_type" data-value="'.sanitize($l['leave_type']).'" data-options="Casual Leave,Sick Leave,Earned Leave,Maternity Leave,Paternity Leave,Compensatory Leave"' : 'data-readonly="1"' ?>><?= sanitize($l['leave_type']) ?></td>
                     <td <?= $canEdit ? 'data-editable="date" data-table="leaves" data-id="'.$l['id'].'" data-field="from_date" data-value="'.$l['from_date'].'"' : 'data-readonly="1"' ?>><?= date('d M Y', strtotime($l['from_date'])) ?></td>
                     <td <?= $canEdit ? 'data-editable="date" data-table="leaves" data-id="'.$l['id'].'" data-field="to_date" data-value="'.$l['to_date'].'"' : 'data-readonly="1"' ?>><?= date('d M Y', strtotime($l['to_date'])) ?></td>
-                    <td data-field="days_display" data-readonly="1"><?= $l['days'] ?> day<?= $l['days'] > 1 ? 's' : '' ?></td>
+                    <td data-field="days_display" data-readonly="1">
+                        <?php $dv = (float)$l['days']; echo $dv == 0.5 ? '½ day' : ($dv . ' day' . ($dv > 1 ? 's' : '')); ?>
+                        <?php if (!empty($l['half_day']) && !empty($l['half_day_period'])): ?>
+                        <span class="badge ms-1" style="font-size:.65rem;background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;"><?= $l['half_day_period'] === 'second_half' ? 'Second Half' : 'First Half' ?></span>
+                        <?php endif; ?>
+                    </td>
                     <td <?= $canEdit ? 'data-editable="text" data-table="leaves" data-id="'.$l['id'].'" data-field="reason" data-value="'.sanitize($l['reason']).'"' : 'data-readonly="1"' ?>><span title="<?= sanitize($l['reason']) ?>"><?= strlen($l['reason']) > 30 ? sanitize(substr($l['reason'],0,30)).'...' : sanitize($l['reason']) ?></span></td>
                     <td>
                         <?php $ls = $lv_status[$l['status']] ?? ['color'=>'secondary','label'=>$l['status']]; ?>
@@ -490,17 +585,33 @@ include 'header.php';
                             </a>
                         <?php endif; ?>
                         <?php
-                        // Single Revoke button for all active statuses — only before leave starts
-                        $can_revoke = $my_emp_id == $l['employee_id']
-                            && in_array($l['status'], ['PENDING','TL_APPROVED','APPROVED'])
-                            && $l['from_date'] > date('Y-m-d');
-                        if ($can_revoke): ?>
-                        <a href="?action=revoke&id=<?= $l['id'] ?>"
-                           class="btn btn-sm btn-outline-warning py-0 px-2 ms-1"
-                           onclick="return hConfirmSync(event,'Revoke this leave? This cannot be undone.')">
-                            <i class="bi bi-arrow-counterclockwise me-1"></i>Revoke
-                        </a>
+                        // Withdraw: own leave, still active
+                        $can_withdraw_main = $my_emp_id && $my_emp_id == $l['employee_id']
+                            && in_array($l['status'], ['PENDING','TL_APPROVED','APPROVED']);
+                        if ($can_withdraw_main): ?>
+                        <button type="button"
+                                class="btn btn-sm btn-outline-danger py-0 px-2 ms-1"
+                                onclick="openWithdrawModal(<?= $l['id'] ?>, '<?= sanitize($l['leave_type']) ?>', '<?= date('d M Y', strtotime($l['from_date'])) ?>', '<?= date('d M Y', strtotime($l['to_date'])) ?>', '<?= $l['status'] ?>')">
+                            <i class="bi bi-arrow-counterclockwise me-1"></i>Withdraw
+                        </button>
                         <?php endif; ?>
+                        <?php if ($l['status'] === 'WITHDRAW_REQUESTED'):
+                            $wPrev    = $l['withdraw_prev_status'] ?? 'APPROVED';
+                            $wNeedsTl = $wPrev === 'TL_APPROVED';
+                            $canActW  = ($wNeedsTl && has_role('SUPER_ADMIN','HR_ADMIN','TEAM_LEAD'))
+                                     || (!$wNeedsTl && has_role('SUPER_ADMIN','HR_ADMIN'));
+                            if ($canActW): ?>
+                        <a href="?action=approve_withdraw&id=<?= $l['id'] ?>"
+                           class="btn btn-sm btn-success py-0 px-2 ms-1"
+                           onclick="return hConfirmSync(event,'Approve this withdrawal request?')">
+                            <i class="bi bi-check2 me-1"></i>Approve Withdrawal
+                        </a>
+                        <a href="?action=reject_withdraw&id=<?= $l['id'] ?>"
+                           class="btn btn-sm btn-outline-secondary py-0 px-2 ms-1"
+                           onclick="return hConfirmSync(event,'Reject this withdrawal?')">
+                            <i class="bi bi-x me-1"></i>Reject
+                        </a>
+                        <?php endif; endif; ?>
                     </td>
                 </tr>
                 <?php endforeach; ?>
@@ -612,32 +723,91 @@ $perm_status_map = [
 </div>
 <?php endif; ?>
 
+<!-- Withdraw Leave Confirmation Modal -->
+<div class="modal fade" id="withdrawModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered" style="max-width:420px;">
+        <div class="modal-content" style="border-radius:16px;border:none;box-shadow:0 20px 60px rgba(0,0,0,.18);">
+            <div class="modal-body px-4 pt-4 pb-3 text-center">
+                <div style="width:52px;height:52px;background:#fef2f2;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 16px;">
+                    <i class="bi bi-arrow-counterclockwise" style="font-size:1.4rem;color:#ef4444;"></i>
+                </div>
+                <h6 class="fw-bold mb-1" id="withdrawModalTitle">Withdraw Leave Request?</h6>
+                <p class="text-muted small mb-3" id="withdrawModalDesc">This will cancel your leave request.</p>
+                <div id="withdrawModalNote" style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px 14px;font-size:.8rem;color:#b91c1c;text-align:left;">
+                    <i class="bi bi-exclamation-triangle-fill me-1"></i>
+                    <span id="withdrawModalNoteText">Once withdrawn, this leave will be marked as cancelled.</span>
+                </div>
+            </div>
+            <div class="modal-footer border-0 px-4 pb-4 pt-2 d-flex gap-2">
+                <button type="button" class="btn flex-fill btn-light" data-bs-dismiss="modal">Keep Leave</button>
+                <a href="#" id="withdrawConfirmBtn" class="btn flex-fill fw-semibold"
+                   style="background:#ef4444;color:#fff;border-radius:8px;">
+                    <i class="bi bi-arrow-counterclockwise me-1"></i><span id="withdrawBtnLabel">Yes, Withdraw</span>
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- Apply Leave Modal -->
 <div class="modal fade" id="leaveModal" tabindex="-1">
     <div class="modal-dialog">
         <form method="POST" class="modal-content" style="border-radius:12px;">
             <div class="modal-header border-0 pb-0"><h5 class="modal-title fw-bold">Apply for Leave</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
             <div class="modal-body">
-                <div class="mb-3">
-                    <label class="form-label fw-semibold small">Leave Type</label>
-                    <select name="leave_type" class="form-select" id="leaveTypeSelect" onchange="showBalance(this.value)">
-                        <?php foreach ($leave_types as $lt): ?>
-                        <option value="<?= sanitize($lt['name']) ?>"><?= sanitize($lt['name']) ?> (<?= $lt['days_per_month'] ?> days/mo)</option>
-                        <?php endforeach; ?>
-                        <?php if (!$leave_types): ?>
-                        <option>Casual Leave</option>
-                        <?php endif; ?>
-                    </select>
-                    <div id="leaveBalanceHint" class="mt-1" style="font-size:.75rem;"></div>
-                </div>
+                <!-- Row 1: Leave Type + Duration -->
                 <div class="row g-3 mb-3">
-                    <div class="col-6">
-                        <label class="form-label fw-semibold small">From Date</label>
-                        <input type="date" name="from_date" class="form-control" required>
+                    <div class="col-7">
+                        <label class="form-label fw-semibold small">Leave Type</label>
+                        <select name="leave_type" class="form-select" id="leaveTypeSelect" onchange="showBalance(this.value)">
+                            <?php foreach ($leave_types as $lt): ?>
+                            <option value="<?= sanitize($lt['name']) ?>"><?= sanitize($lt['name']) ?> (<?= $lt['days_per_month'] ?> days/mo)</option>
+                            <?php endforeach; ?>
+                            <?php if (!$leave_types): ?>
+                            <option>Casual Leave</option>
+                            <?php endif; ?>
+                        </select>
+                        <div id="leaveBalanceHint" class="mt-1" style="font-size:.75rem;"></div>
                     </div>
-                    <div class="col-6">
+                    <div class="col-5">
+                        <label class="form-label fw-semibold small">Duration</label>
+                        <select class="form-select" id="leaveDurationSelect" onchange="onDurationChange(this.value)">
+                            <option value="full">Full Day</option>
+                            <option value="half">Half Day</option>
+                        </select>
+                        <!-- hidden field submitted to PHP -->
+                        <input type="hidden" name="half_day" id="halfDayHidden" value="0">
+                    </div>
+                </div>
+                <!-- First / Second half selector (hidden until Half Day chosen) -->
+                <div id="halfDayPeriodRow" style="display:none;" class="mb-3">
+                    <label class="form-label fw-semibold small">Period</label>
+                    <div class="d-flex gap-2">
+                        <label class="flex-fill text-center" style="cursor:pointer;">
+                            <input type="radio" name="half_day_period" value="first_half" id="radioFirstHalf" class="d-none" checked>
+                            <div id="pill_first" onclick="selectPeriod('first_half')"
+                                 style="border:2px solid #3b82f6;background:#eff6ff;color:#1d4ed8;border-radius:8px;padding:9px 0;font-size:.82rem;font-weight:600;transition:all .15s;">
+                                <i class="bi bi-brightness-high me-1"></i>First Half
+                            </div>
+                        </label>
+                        <label class="flex-fill text-center" style="cursor:pointer;">
+                            <input type="radio" name="half_day_period" value="second_half" id="radioSecondHalf" class="d-none">
+                            <div id="pill_second" onclick="selectPeriod('second_half')"
+                                 style="border:2px solid #e2e8f0;background:#f8fafc;color:#64748b;border-radius:8px;padding:9px 0;font-size:.82rem;font-weight:600;transition:all .15s;">
+                                <i class="bi bi-moon me-1"></i>Second Half
+                            </div>
+                        </label>
+                    </div>
+                </div>
+                <!-- Date row -->
+                <div class="row g-3 mb-3">
+                    <div class="col-6" id="fromDateCol">
+                        <label class="form-label fw-semibold small" id="fromDateLabel">From Date</label>
+                        <input type="date" name="from_date" id="leaveFromDate" class="form-control" required onchange="syncHalfDayTo()">
+                    </div>
+                    <div class="col-6" id="toDateCol">
                         <label class="form-label fw-semibold small">To Date</label>
-                        <input type="date" name="to_date" class="form-control" required>
+                        <input type="date" name="to_date" id="leaveToDate" class="form-control" required>
                     </div>
                 </div>
                 <div class="mb-3">
@@ -654,6 +824,64 @@ $perm_status_map = [
 </div>
 
 <script>
+function openWithdrawModal(id, type, fromDate, toDate, status) {
+    document.getElementById('withdrawModalDesc').textContent =
+        type + ' · ' + fromDate + (fromDate !== toDate ? ' – ' + toDate : '');
+    document.getElementById('withdrawConfirmBtn').href = '?action=withdraw&id=' + id;
+    if (status === 'TL_APPROVED') {
+        document.getElementById('withdrawModalTitle').textContent    = 'Request Withdrawal?';
+        document.getElementById('withdrawModalNoteText').textContent = 'This leave was approved by your TL. A withdrawal request will be sent to your Team Lead for approval.';
+        document.getElementById('withdrawBtnLabel').textContent      = 'Request Withdrawal';
+    } else if (status === 'APPROVED') {
+        document.getElementById('withdrawModalTitle').textContent    = 'Request Withdrawal?';
+        document.getElementById('withdrawModalNoteText').textContent = 'This leave is fully approved. A withdrawal request will be sent to HR for approval.';
+        document.getElementById('withdrawBtnLabel').textContent      = 'Request Withdrawal';
+    } else {
+        document.getElementById('withdrawModalTitle').textContent    = 'Withdraw Leave Request?';
+        document.getElementById('withdrawModalNoteText').textContent = 'Once withdrawn, this leave will be cancelled immediately.';
+        document.getElementById('withdrawBtnLabel').textContent      = 'Yes, Withdraw';
+    }
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('withdrawModal')).show();
+}
+
+function onDurationChange(val) {
+    const isHalf    = val === 'half';
+    const toCol     = document.getElementById('toDateCol');
+    const toDate    = document.getElementById('leaveToDate');
+    const fromDate  = document.getElementById('leaveFromDate');
+    const periodRow = document.getElementById('halfDayPeriodRow');
+    const fromLabel = document.getElementById('fromDateLabel');
+    const fromCol   = document.getElementById('fromDateCol');
+    document.getElementById('halfDayHidden').value = isHalf ? '1' : '0';
+    if (isHalf) {
+        toCol.style.display     = 'none';
+        periodRow.style.display = '';
+        toDate.removeAttribute('required');
+        toDate.value            = fromDate.value;
+        fromLabel.textContent   = 'Date';
+        fromCol.className       = 'col-12';
+    } else {
+        toCol.style.display     = '';
+        periodRow.style.display = 'none';
+        toDate.setAttribute('required', '');
+        fromLabel.textContent   = 'From Date';
+        fromCol.className       = 'col-6';
+    }
+}
+function syncHalfDayTo() {
+    if (document.getElementById('halfDayHidden').value === '1') {
+        document.getElementById('leaveToDate').value = document.getElementById('leaveFromDate').value;
+    }
+}
+function selectPeriod(val) {
+    document.getElementById('radioFirstHalf').checked  = (val === 'first_half');
+    document.getElementById('radioSecondHalf').checked = (val === 'second_half');
+    const activeStyle   = 'border:2px solid #3b82f6;background:#eff6ff;color:#1d4ed8;border-radius:8px;padding:9px 0;font-size:.82rem;font-weight:600;transition:all .15s;';
+    const inactiveStyle = 'border:2px solid #e2e8f0;background:#f8fafc;color:#64748b;border-radius:8px;padding:9px 0;font-size:.82rem;font-weight:600;transition:all .15s;';
+    document.getElementById('pill_first').style.cssText  = val === 'first_half'  ? activeStyle : inactiveStyle;
+    document.getElementById('pill_second').style.cssText = val === 'second_half' ? activeStyle : inactiveStyle;
+}
+
 const leaveBalance = <?= json_encode($leave_balance ?: new stdClass()) ?>;
 function showBalance(type) {
     const hint = document.getElementById('leaveBalanceHint');
@@ -661,15 +889,16 @@ function showBalance(type) {
     const b = leaveBalance[type];
     if (!b) { hint.innerHTML = ''; return; }
     const color = b.remaining > 0 ? '#15803d' : '#dc2626';
-    hint.innerHTML = `<span style="color:${color};">
-        <i class="bi bi-info-circle me-1"></i>
-        ${b.remaining} day(s) remaining this month (${b.used} used of ${b.allowed} allowed).
-    </span>`;
+    hint.innerHTML = `<span style="color:${color};"><i class="bi bi-info-circle me-1"></i>${b.remaining} day(s) remaining this month (${b.used} used of ${b.allowed} allowed).</span>`;
 }
-// Trigger on modal open
 document.getElementById('leaveModal')?.addEventListener('show.bs.modal', () => {
     const sel = document.getElementById('leaveTypeSelect');
     if (sel) showBalance(sel.value);
+});
+// Reset to full-day state on modal close
+document.getElementById('leaveModal')?.addEventListener('hidden.bs.modal', () => {
+    const dur = document.getElementById('leaveDurationSelect');
+    if (dur && dur.value !== 'full') { dur.value = 'full'; onDurationChange('full'); }
 });
 </script>
 
