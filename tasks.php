@@ -159,6 +159,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 'tasks.php?tab=approvals'
             );
         }
+        if ($is_ajax) {
+            header('Content-Type: application/json');
+            echo json_encode(['ok' => true]);
+            exit;
+        }
         set_flash('success', 'Task created.' . ($needs_appr ? ' Your TL will be notified to approve.' : ''));
         header("Location: tasks.php"); exit;
     }
@@ -386,16 +391,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         $t_row = $chk->fetch();
         if ($t_row && $is_tl) {
             $conn->prepare("UPDATE tasks SET status='REWORK', updated_at=NOW() WHERE id=?")->execute([$tid]);
-            $conn->prepare("UPDATE task_approvals SET status='rework', reviewed_by=?, reviewed_at=NOW(), note=? WHERE task_id=? AND status='pending'")
-                 ->execute([$uid, $note, $tid]);
+            // Upsert the approval record: update pending row if it exists, otherwise insert
+            $chkPend = $conn->prepare("SELECT id FROM task_approvals WHERE task_id=? AND status='pending'");
+            $chkPend->execute([$tid]);
+            if ($chkPend->fetchColumn()) {
+                $conn->prepare("UPDATE task_approvals SET status='rework', reviewed_by=?, reviewed_at=NOW(), note=? WHERE task_id=? AND status='pending'")
+                     ->execute([$uid, $note, $tid]);
+            } else {
+                // No pending record (edge case: status changed outside approval flow)
+                $conn->prepare("INSERT INTO task_approvals (task_id, submitted_by, status, reviewed_by, reviewed_at, note) VALUES (?,?,?,?,NOW(),?)")
+                     ->execute([$tid, $t_row['assigned_to'] ?? $uid, 'rework', $uid, $note]);
+            }
             if ($note) {
                 $conn->prepare("INSERT INTO task_comments (task_id,user_id,comment) VALUES (?,?,?)")
                      ->execute([$tid, $uid, "↩️ Sent back for rework: $note"]);
             }
             log_task_activity($conn, $tid, $uid, 'REJECTED', 'Sent for rework: '.$note);
-            // Notify assignee
-            if ($t_row['assigned_to'] && $t_row['assigned_to'] != $uid) {
-                hrms_notify($conn, (int)$t_row['assigned_to'], 'task_rework', 'Rework needed: '.mb_substr($t_row['title'],0,60), $note ?: 'Please revise and resubmit.', "task_detail.php?id=$tid");
+            // Notify assignee (always notify, even if same as reviewer for different-role scenario)
+            $notify_rework_to = (int)($t_row['assigned_to'] ?? 0);
+            if ($notify_rework_to && $notify_rework_to != $uid) {
+                hrms_notify($conn, $notify_rework_to, 'task_rework',
+                    'Rework needed: '.mb_substr($t_row['title'],0,60),
+                    $note ?: 'Please revise and resubmit.',
+                    "task_detail.php?id=$tid"
+                );
+            }
+            // Also notify assigned_by if different from both TL and assignee (cross-team case)
+            $notify_rework_by = (int)($t_row['assigned_by'] ?? 0);
+            if ($notify_rework_by && $notify_rework_by != $uid && $notify_rework_by != $notify_rework_to) {
+                hrms_notify($conn, $notify_rework_by, 'task_rework',
+                    'Rework needed: '.mb_substr($t_row['title'],0,60),
+                    'Task sent back for rework by TL'.($note ? ': '.$note : ''),
+                    "task_detail.php?id=$tid"
+                );
             }
             // Sync to DigiOps (rework = in_progress)
             _digiops_task_sync($conn, $tid, 'REWORK');
@@ -697,7 +725,7 @@ if (isset($_GET['delete'])) {
     header("Location: tasks.php?tab=bin"); exit;
 }
 
-$tab = $_GET['tab'] ?? 'my';
+$tab = isset($_GET['_frag']) ? 'my' : ($_GET['tab'] ?? 'my');
 
 // ── FETCH BLOCK REQUESTS for current user (only ones directed at me by user ID) ──
 $my_block_requests = [];
@@ -1050,7 +1078,21 @@ if ($role === 'TEAM_LEAD' && $my_team) {
     }
 }
 
-include 'header.php';
+// ── Fragment mode: skip header/footer/modals, return only the 4 task view sections ──
+$is_frag = isset($_GET['_frag']);
+
+// ── Batch-fetch time log data for all tasks in 2 queries (eliminates N+1) ──
+$_tlh_map = []; // logged hours from task_time_logs
+$_tts_map = []; // logged seconds from task_timers
+if ($my_tasks) {
+    $_ids_in = implode(',', array_map(fn($t) => (int)$t['id'], $my_tasks));
+    foreach ($conn->query("SELECT task_id, COALESCE(SUM(hours),0) h FROM task_time_logs WHERE task_id IN ($_ids_in) GROUP BY task_id")->fetchAll() as $r)
+        $_tlh_map[(int)$r['task_id']] = (float)$r['h'];
+    foreach ($conn->query("SELECT task_id, COALESCE(SUM(duration_seconds),0) s FROM task_timers WHERE task_id IN ($_ids_in) AND ended_at IS NOT NULL GROUP BY task_id")->fetchAll() as $r)
+        $_tts_map[(int)$r['task_id']] = (float)$r['s'];
+}
+
+if (!$is_frag) include 'header.php';
 
 $priority_color = ['LOW'=>'success','MEDIUM'=>'warning','HIGH'=>'danger','URGENT'=>'dark'];
 $status_color   = ['TODO'=>'secondary','IN_PROGRESS'=>'primary','REVIEW'=>'warning','DONE'=>'success','REQUESTED'=>'info','REJECTED'=>'danger','BLOCKED'=>'danger'];
@@ -1187,6 +1229,11 @@ $status_color   = ['TODO'=>'secondary','IN_PROGRESS'=>'primary','REVIEW'=>'warni
 .kanban-col.drop-active { background:#eef2ff; }
 .kanban-empty { text-align:center;color:#94a3b8;font-size:.78rem;padding:24px 0; }
 
+/* Kanban sort buttons */
+.kb-sort-btn { background:transparent;border:1px solid #e2e8f0;border-radius:5px;width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;font-size:.7rem;color:#94a3b8;cursor:pointer;padding:0;transition:all .12s;flex-shrink:0; }
+.kb-sort-btn:hover { background:#f1f5f9;color:#475569;border-color:#cbd5e1; }
+.kb-sort-btn.active { background:#1e293b;border-color:#1e293b;color:#fff; }
+
 /* Table improvements */
 .tm-table thead th { background:#f8fafc;font-size:.75rem;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:#64748b;border-bottom:2px solid #e2e8f0;padding:10px 12px;white-space:nowrap;cursor:pointer; }
 .tm-table thead th:hover { color:#1e293b; }
@@ -1196,6 +1243,8 @@ $status_color   = ['TODO'=>'secondary','IN_PROGRESS'=>'primary','REVIEW'=>'warni
 
 /* Overdue pill */
 .overdue-pill { display:inline-flex;align-items:center;gap:3px;background:#fee2e2;color:#b91c1c;border-radius:20px;padding:2px 8px;font-size:.65rem;font-weight:700; }
+
+@keyframes tmSpinRefresh { to { transform: rotate(360deg); } }
 
 /* Avatar circle */
 .av-circle { width:28px;height:28px;border-radius:50%;background:#dbeafe;color:#1d4ed8;display:inline-flex;align-items:center;justify-content:center;font-size:.72rem;font-weight:700;flex-shrink:0; }
@@ -1244,6 +1293,7 @@ $status_color   = ['TODO'=>'secondary','IN_PROGRESS'=>'primary','REVIEW'=>'warni
 .df-date-input:focus { border-color:#3b82f6; }
 .df-mode-btn { border:1.5px solid #e2e8f0;background:#f8fafc;border-radius:20px;padding:4px 12px;font-size:.73rem;font-weight:600;color:#64748b;cursor:pointer;transition:all .15s; }
 .df-mode-btn.active { background:#e0f2fe;border-color:#38bdf8;color:#0369a1; }
+.df-mode-btn[data-mode="completed"].active { background:#dcfce7;border-color:#4ade80;color:#166534; }
 .df-clear { background:transparent;border:none;border-radius:20px;padding:4px 10px;font-size:.73rem;color:#94a3b8;cursor:pointer;display:none;align-items:center;gap:4px; }
 .df-clear.visible { display:inline-flex; }
 .df-clear:hover { color:#ef4444; }
@@ -1382,7 +1432,7 @@ if (!empty($flash)): ?>
     <i class="bi bi-people-fill me-1"></i>Team Tasks
 </div>
 <?php endif; ?>
-<div class="row g-3 mb-4">
+<div class="row g-3 mb-4" id="taskStatsRow">
     <div class="col-6 col-sm-4 col-md">
         <div class="tm-stat s-todo">
             <div class="tm-stat-val" style="color:var(--tm-todo)"><?= $stats['todo'] ?></div>
@@ -1605,7 +1655,13 @@ if (!empty($flash)): ?>
         <?php endforeach; ?>
     </select>
     <?php endif; ?>
-    <div class="ms-auto d-flex gap-2">
+    <div class="ms-auto d-flex gap-2 align-items-center">
+        <button type="button" id="refreshTasksBtn" title="Refresh tasks"
+                onclick="refreshTasks(this)"
+                style="display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border:1.5px solid #e2e8f0;border-radius:8px;background:#fff;color:#475569;font-size:.82rem;font-weight:600;cursor:pointer;transition:all .15s;">
+            <i class="bi bi-arrow-clockwise" id="refreshIcon"></i>Refresh
+        </button>
+        <div style="width:1px;height:22px;background:#e2e8f0;"></div>
         <button type="button" class="view-btn active" data-view="cards" title="Card view"><i class="bi bi-grid-3x3-gap-fill me-1"></i>Cards</button>
         <button type="button" class="view-btn" data-view="table" title="Table view"><i class="bi bi-table me-1"></i>Table</button>
         <button type="button" class="view-btn" data-view="kanban" title="Kanban board"><i class="bi bi-kanban me-1"></i>Board</button>
@@ -1617,6 +1673,7 @@ if (!empty($flash)): ?>
     <span class="df-label"><i class="bi bi-calendar3 me-1"></i>Date</span>
     <button type="button" class="df-mode-btn active" id="dfModedue" data-mode="due" title="Filter by due date">Due Date</button>
     <button type="button" class="df-mode-btn" id="dfModecreated" data-mode="created" title="Filter by creation date">Created</button>
+    <button type="button" class="df-mode-btn" id="dfModecompleted" data-mode="completed" title="Show completed tasks filtered by completion date"><i class="bi bi-check-circle me-1"></i>Completed</button>
     <div class="df-sep"></div>
     <button type="button" class="df-preset" data-preset="today">Today</button>
     <button type="button" class="df-preset" data-preset="week">This Week</button>
@@ -1636,12 +1693,7 @@ if (!empty($flash)): ?>
 <div class="row g-3" id="taskGrid">
 <?php foreach ($my_tasks as $t):
     $overdue = $t['due_date'] && $t['due_date'] < date('Y-m-d') && $t['status'] !== 'DONE';
-    $tl_stmt = $conn->prepare("SELECT COALESCE(SUM(hours),0) as h FROM task_time_logs WHERE task_id=?");
-    $tl_stmt->execute([$t['id']]);
-    $logged_hours = (float)$tl_stmt->fetchColumn();
-    $tt_stmt = $conn->prepare("SELECT COALESCE(SUM(duration_seconds),0) as s FROM task_timers WHERE task_id=? AND ended_at IS NOT NULL");
-    $tt_stmt->execute([$t['id']]);
-    $logged_hours += round((float)$tt_stmt->fetchColumn() / 3600, 2);
+    $logged_hours = ($_tlh_map[$t['id']] ?? 0) + round(($_tts_map[$t['id']] ?? 0) / 3600, 2);
     $pct = $t['estimated_hours'] > 0 ? min(100, round(($logged_hours / $t['estimated_hours']) * 100)) : 0;
     $initials_a = strtoupper(substr($t['assignee_name'] ?? 'U', 0, 1));
     $days_left   = $t['due_date'] ? (int)((strtotime($t['due_date']) - time()) / 86400) : null;
@@ -1655,7 +1707,8 @@ if (!empty($flash)): ?>
      data-project="<?= (int)($t['project_id'] ?? 0) ?>"
      data-title="<?= strtolower(htmlspecialchars($t['title'])) ?>"
      data-due="<?= $t['due_date'] ?? '' ?>"
-     data-created="<?= substr($t['created_at'],0,10) ?>">
+     data-created="<?= substr($t['created_at'],0,10) ?>"
+     data-updated="<?= $t['status']==='DONE' ? substr($t['updated_at'],0,10) : '' ?>">
     <div class="card border-0 shadow-sm task-card h-100 position-relative" style="padding-left:4px;">
         <div class="priority-stripe stripe-<?= $t['priority'] ?>"></div>
         <div class="card-body p-3">
@@ -1828,6 +1881,7 @@ if (!empty($flash)): ?>
                     <th onclick="sortTable(2)">Priority <i class="bi bi-chevron-expand" style="font-size:.65rem;"></i></th>
                     <th onclick="sortTable(3)">Status <i class="bi bi-chevron-expand" style="font-size:.65rem;"></i></th>
                     <th onclick="sortTable(4)">Due Date <i class="bi bi-chevron-expand" style="font-size:.65rem;"></i></th>
+                    <th onclick="sortTable(5)">Created <i class="bi bi-chevron-expand" style="font-size:.65rem;"></i></th>
                     <th>Progress</th>
                     <th></th>
                 </tr>
@@ -1835,12 +1889,7 @@ if (!empty($flash)): ?>
             <tbody>
             <?php foreach ($my_tasks as $t):
                 $overdue_t = $t['due_date'] && $t['due_date'] < date('Y-m-d') && $t['status'] !== 'DONE';
-                $tl2 = $conn->prepare("SELECT COALESCE(SUM(hours),0) as h FROM task_time_logs WHERE task_id=?");
-                $tl2->execute([$t['id']]);
-                $lh2 = (float)$tl2->fetchColumn();
-                $tt2 = $conn->prepare("SELECT COALESCE(SUM(duration_seconds),0) as s FROM task_timers WHERE task_id=? AND ended_at IS NOT NULL");
-                $tt2->execute([$t['id']]);
-                $lh2 += round((float)$tt2->fetchColumn() / 3600, 2);
+                $lh2 = ($_tlh_map[$t['id']] ?? 0) + round(($_tts_map[$t['id']] ?? 0) / 3600, 2);
                 $pct2 = $t['estimated_hours'] > 0 ? min(100, round(($lh2 / $t['estimated_hours']) * 100)) : 0;
             ?>
             <tr class="task-item" id="task-card-<?= $t['id'] ?>"
@@ -1852,7 +1901,8 @@ if (!empty($flash)): ?>
                 data-project="<?= (int)($t['project_id'] ?? 0) ?>"
                 data-title="<?= strtolower(htmlspecialchars($t['title'])) ?>"
                 data-due="<?= $t['due_date'] ?? '' ?>"
-                data-created="<?= substr($t['created_at'],0,10) ?>">
+                data-created="<?= substr($t['created_at'],0,10) ?>"
+                data-updated="<?= $t['status']==='DONE' ? substr($t['updated_at'],0,10) : '' ?>">
                 <td class="ps-4" style="min-width:220px;">
                     <div class="d-flex align-items-center gap-2">
                         <div style="width:3px;height:36px;border-radius:2px;flex-shrink:0;" class="stripe-<?= $t['priority'] ?>"></div>
@@ -1887,7 +1937,8 @@ if (!empty($flash)): ?>
                     $tbl_can_status = $is_tl || $hr_view || $tbl_is_creator;
                 ?>
                 <?php $tbl_can_priority = $is_tl || $hr_view; ?>
-                <td>
+                <?php $pri_sort = ['LOW'=>1,'MEDIUM'=>2,'HIGH'=>3,'URGENT'=>4][$t['priority']] ?? 0; ?>
+                <td data-sort="<?= $pri_sort ?>">
                 <?php if ($tbl_can_priority): ?>
                     <select class="qe-select pri-select" data-task="<?= $t['id'] ?>" data-field="priority">
                         <?php foreach (['LOW','MEDIUM','HIGH','URGENT'] as $p): ?>
@@ -1898,7 +1949,8 @@ if (!empty($flash)): ?>
                     <span class="pri-badge pri-<?= $t['priority'] ?>"><?= $t['priority'] ?></span>
                 <?php endif; ?>
                 </td>
-                <td>
+                <?php $sts_sort = ['TODO'=>1,'IN_PROGRESS'=>2,'REVIEW'=>3,'REWORK'=>4,'BLOCKED'=>5,'DONE'=>6][$t['status']] ?? 0; ?>
+                <td data-sort="<?= $sts_sort ?>">
                 <?php if ($tbl_can_status): ?>
                     <select class="qe-select sts-select" data-task="<?= $t['id'] ?>" data-field="status">
                         <?php foreach (['TODO','IN_PROGRESS','REVIEW','BLOCKED','DONE'] as $s): ?>
@@ -1909,13 +1961,18 @@ if (!empty($flash)): ?>
                     <span class="sts-badge sts-<?= $t['status'] ?>"><?= str_replace('_',' ',$t['status']) ?></span>
                 <?php endif; ?>
                 </td>
-                <td style="white-space:nowrap;">
+                <td style="white-space:nowrap;" data-sort="<?= $t['due_date'] ?: '9999-99-99' ?>">
                     <?php if ($t['due_date']): ?>
                     <span class="<?= $overdue_t ? 'text-danger fw-semibold' : 'text-muted' ?>" style="font-size:.82rem;">
                         <?= date('d M Y', strtotime($t['due_date'])) ?>
                     </span>
                     <?php if ($overdue_t): ?><span class="overdue-pill ms-1"><i class="bi bi-exclamation-triangle-fill"></i>Overdue</span><?php endif; ?>
                     <?php else: ?><span class="text-muted small">—</span><?php endif; ?>
+                </td>
+                <td style="white-space:nowrap;" data-sort="<?= substr($t['created_at'],0,10) ?>">
+                    <span class="text-muted" style="font-size:.82rem;">
+                        <?= date('d M Y', strtotime($t['created_at'])) ?>
+                    </span>
                 </td>
                 <td style="min-width:120px;">
                     <?php if ($t['estimated_hours']): ?>
@@ -2001,15 +2058,26 @@ try {
             <span class="col-dot" style="background:<?= $kc['dot'] ?>;"></span>
             <?= $kc['label'] ?>
         </div>
-        <span class="col-count kanban-count"><?= count($k_tasks) ?></span>
+        <div class="d-flex align-items-center gap-1">
+            <button class="kb-sort-btn" data-dir="desc" title="Newest first"
+                    onclick="kbSort(this,'<?= $kst ?>','desc')">
+                <i class="bi bi-sort-down"></i>
+            </button>
+            <button class="kb-sort-btn" data-dir="asc" title="Oldest first"
+                    onclick="kbSort(this,'<?= $kst ?>','asc')">
+                <i class="bi bi-sort-up"></i>
+            </button>
+            <span class="col-count kanban-count"><?= count($k_tasks) ?></span>
+        </div>
     </div>
     <div class="kanban-cards" id="kc-<?= $kst ?>">
-    <?php foreach ($k_tasks as $t):
+    <?php foreach ($k_tasks as $kidx => $t):
         $ov_k = $t['due_date'] && $t['due_date'] < date('Y-m-d') && $t['status'] !== 'DONE';
         $can_drag_k = !$hr_view && $t['status'] !== 'BLOCKED' && ($is_tl || $t['assigned_to']==$uid || $t['assigned_by']==$uid);
     ?>
     <div class="kanban-card task-item <?= $can_drag_k ? 'kb-draggable' : '' ?>"
          data-task-id="<?= $t['id'] ?>"
+         data-original-index="<?= $kidx ?>"
          data-status="<?= $kst ?>"
          data-assignee-id="<?= (int)$t['assigned_to'] ?>"
          data-assigned-by="<?= (int)$t['assigned_by'] ?>"
@@ -2019,6 +2087,7 @@ try {
          data-title="<?= strtolower(htmlspecialchars($t['title'])) ?>"
          data-due="<?= $t['due_date'] ?? '' ?>"
          data-created="<?= substr($t['created_at'],0,10) ?>"
+         data-updated="<?= $kst==='DONE' ? substr($t['updated_at'],0,10) : '' ?>"
          data-needs-approval="<?= $t['needs_approval'] ? '1' : '0' ?>"
          data-is-learning="<?= !empty($t['is_learning_task']) ? '1' : '0' ?>"
          data-quiz-required="<?= !empty($t['quiz_required']) ? '1' : '0' ?>"
@@ -2160,6 +2229,8 @@ try {
 </div>
 
 <?php endif; ?>
+
+<?php if ($is_frag): exit; endif; ?>
 
 <!-- ── TAB: INCOMING REQUESTS ─────────────────────────── -->
 <?php elseif ($tab === 'incoming' && $is_tl): ?>
@@ -3402,7 +3473,7 @@ $cal_tasks_json = json_encode(array_values(array_map(function($t) {
 <?php if (!$is_tl && !$hr_view): ?>
 <div class="modal fade" id="ownTaskModal" tabindex="-1">
     <div class="modal-dialog modal-lg modal-dialog-centered">
-        <form method="POST" class="modal-content" style="border-radius:16px;border:none;box-shadow:0 20px 60px rgba(0,0,0,.15);">
+        <div class="modal-content" id="ownTaskForm" style="border-radius:16px;border:none;box-shadow:0 20px 60px rgba(0,0,0,.15);">
             <input type="hidden" name="action" value="create_own_task">
             <div class="modal-header border-0 pb-0 pt-4 px-4">
                 <div>
@@ -3460,9 +3531,9 @@ $cal_tasks_json = json_encode(array_values(array_map(function($t) {
             </div>
             <div class="modal-footer border-0 px-4 pb-4 pt-2 gap-2">
                 <button type="button" class="btn" data-bs-dismiss="modal" style="background:#f1f5f9;border:none;border-radius:8px;color:#475569;">Cancel</button>
-                <button type="submit" class="btn btn-primary" style="border-radius:8px;"><i class="bi bi-check-lg me-1"></i> Create Task</button>
+                <button type="button" class="btn btn-primary" style="border-radius:8px;" onclick="submitOwnTask(this)"><i class="bi bi-check-lg me-1"></i> Create Task</button>
             </div>
-        </form>
+        </div>
     </div>
 </div>
 <?php endif; ?>
@@ -3739,6 +3810,14 @@ function applyDateRange(selector, fromVal, toVal, countEl, noResEl) {
                         const row = this.closest('tr');
                         if (row && field === 'status')   row.dataset.status   = value;
                         if (row && field === 'priority') row.dataset.priority = value;
+                        // Update data-sort on the <td> so table sorting stays correct
+                        const td = this.closest('td');
+                        if (td && field === 'priority') {
+                            td.dataset.sort = ({LOW:1,MEDIUM:2,HIGH:3,URGENT:4}[value] ?? 0);
+                        }
+                        if (td && field === 'status') {
+                            td.dataset.sort = ({TODO:1,IN_PROGRESS:2,REVIEW:3,REWORK:4,BLOCKED:5,DONE:6}[value] ?? 0);
+                        }
                         setTimeout(() => this.classList.remove('saved'), 1500);
                     }
                 })
@@ -3899,6 +3978,7 @@ function applyDateRange(selector, fromVal, toVal, countEl, noResEl) {
         const from = dfFrom?.value || '';
         const to   = dfTo?.value   || '';
         const hasDate = from || to;
+        const completedMode = dateMode === 'completed';
         if (dfClear) dfClear.classList.toggle('visible', !!(from || to));
 
         let vis = 0;
@@ -3910,7 +3990,10 @@ function applyDateRange(selector, fromVal, toVal, countEl, noResEl) {
             const ea       = el.dataset.assigneeId || '';
             const eb       = el.dataset.assignedBy || '';
             const eproj    = el.dataset.project || '0';
-            const dv       = dateMode === 'due' ? (el.dataset.due || '') : (el.dataset.created || '');
+            // In completed mode: filter by completion date (data-updated), force DONE status
+            const dv = dateMode === 'due'
+                ? (el.dataset.due || '')
+                : (dateMode === 'completed' ? (el.dataset.updated || '') : (el.dataset.created || ''));
             const inDate   = !hasDate
                           || ((!from || !dv || dv >= from) && (!to || !dv || dv <= to));
             const myUid    = '<?= $uid ?>';
@@ -3918,9 +4001,11 @@ function applyDateRange(selector, fromVal, toVal, countEl, noResEl) {
                           || (mem === 'MY_TASKS' && ea === myUid)
                           || (mem !== 'MY_TASKS' && (ea === mem || eb === mem));
             const projMatch = !proj || eproj === proj;
+            // Completed mode forces DONE status; otherwise use dropdown filter
+            const stsMatch = completedMode ? (es === 'DONE') : (!sts || es === sts);
             const show     = (!q   || title.includes(q) || aName.includes(q))
                           && (!pri || ep === pri)
-                          && (!sts || es === sts)
+                          && stsMatch
                           && projMatch
                           && memMatch
                           && inDate;
@@ -3928,7 +4013,27 @@ function applyDateRange(selector, fromVal, toVal, countEl, noResEl) {
             if (show) vis++;
         });
         if (noRes)   noRes.classList.toggle('d-none', vis > 0);
-        if (dfCount) dfCount.textContent = hasDate ? (vis + ' shown') : '';
+        if (dfCount) dfCount.textContent = (hasDate || completedMode) ? (vis + ' shown') : '';
+
+        // ── Kanban post-filter: update column counts, empty states, column visibility ──
+        document.querySelectorAll('.kanban-col').forEach(col => {
+            const colStatus = col.dataset.status || '';
+            // In completed mode: hide all columns except DONE
+            if (completedMode && colStatus !== 'DONE') {
+                col.style.display = 'none';
+                return;
+            }
+            col.style.display = '';
+            const cards  = col.querySelectorAll('.kanban-card.task-item');
+            let colVis   = 0;
+            cards.forEach(c => { if (c.style.display !== 'none') colVis++; });
+            // Update count badge
+            const badge  = col.querySelector('.kanban-count');
+            if (badge)  badge.textContent = colVis;
+            // Show/hide empty placeholder
+            const empty  = col.querySelector('.kb-empty');
+            if (empty)  empty.style.display = colVis > 0 ? 'none' : '';
+        });
     }
 
     [search, priSel, stsSel, projSel, memberSel].forEach(el => {
@@ -3937,6 +4042,8 @@ function applyDateRange(selector, fromVal, toVal, countEl, noResEl) {
 
     // Apply on load (restoring saved filters or member from URL)
     applyAll();
+    // Expose for AJAX refresh
+    window._tmApplyAll = applyAll;
     } catch(e) { console.warn('Task filter error:', e); }
 })();
 
@@ -4072,16 +4179,50 @@ function applyDateRange(selector, fromVal, toVal, countEl, noResEl) {
 // ─────────────────────────────────────────────────────────
 let _sortDir = {};
 function sortTable(col) {
-    const tb = document.querySelector('#taskTableEl tbody');
+    const tb   = document.querySelector('#taskTableEl tbody');
+    const ths  = document.querySelectorAll('#taskTableEl thead th');
     if (!tb) return;
-    const rows = Array.from(tb.querySelectorAll('tr'));
+
+    // Only sort visible (non-filtered) rows
+    const rows = Array.from(tb.querySelectorAll('tr.task-item')).filter(r => r.style.display !== 'none');
+    const hidden = Array.from(tb.querySelectorAll('tr.task-item')).filter(r => r.style.display === 'none');
+
     _sortDir[col] = !_sortDir[col];
+    const asc = _sortDir[col];
+
     rows.sort((a, b) => {
-        const av = (a.cells[col]?.innerText || '').trim();
-        const bv = (b.cells[col]?.innerText || '').trim();
-        return _sortDir[col] ? av.localeCompare(bv) : bv.localeCompare(av);
+        // Use data-sort on the cell when available (priority, status, dates)
+        const cellA = a.cells[col];
+        const cellB = b.cells[col];
+        const av = (cellA?.dataset?.sort !== undefined ? cellA.dataset.sort : (cellA?.innerText || '').trim());
+        const bv = (cellB?.dataset?.sort !== undefined ? cellB.dataset.sort : (cellB?.innerText || '').trim());
+        // Numeric comparison ONLY for pure integers (priority rank 1-4, status rank 1-6).
+        // ISO date strings like "2026-06-28" must NOT go through parseFloat — it returns
+        // just the year (2026) and loses month/day, making all same-year dates equal.
+        const isInt = v => /^\d+$/.test(v);
+        if (isInt(av) && isInt(bv)) return asc ? parseInt(av) - parseInt(bv) : parseInt(bv) - parseInt(av);
+        // String / date comparison — ISO dates ("YYYY-MM-DD") sort correctly as strings
+        return asc ? av.localeCompare(bv) : bv.localeCompare(av);
     });
+
+    // Re-append sorted visible rows, then re-append hidden ones (preserves filter state)
     rows.forEach(r => tb.appendChild(r));
+    hidden.forEach(r => tb.appendChild(r));
+
+    // Update column header sort icons
+    ths.forEach((th, i) => {
+        const icon = th.querySelector('i.bi');
+        if (!icon) return;
+        if (i === col) {
+            icon.className = asc
+                ? 'bi bi-chevron-up'
+                : 'bi bi-chevron-down';
+            icon.style.color = '#3b82f6';
+        } else {
+            icon.className = 'bi bi-chevron-expand';
+            icon.style.color = '';
+        }
+    });
 }
 
 // ─────────────────────────────────────────────────────────
@@ -4114,9 +4255,42 @@ document.querySelectorAll('.appr-info-tip').forEach(function(el) {
 });
 
 // ─────────────────────────────────────────────────────────
+// KANBAN COLUMN SORT (newest / oldest)
+// ─────────────────────────────────────────────────────────
+function kbSort(btn, status, dir) {
+    const col = document.getElementById('kc-' + status);
+    if (!col) return;
+
+    const colEl    = btn.closest('.kanban-col');
+    const wasActive = btn.classList.contains('active');
+
+    // Deactivate all sort buttons in this column
+    colEl.querySelectorAll('.kb-sort-btn').forEach(b => b.classList.remove('active'));
+
+    const cards = Array.from(col.querySelectorAll('.kanban-card'));
+
+    if (wasActive) {
+        // Clicking the already-active button → reset to original render order
+        cards.sort((a, b) =>
+            parseInt(a.dataset.originalIndex || 0) - parseInt(b.dataset.originalIndex || 0)
+        );
+    } else {
+        btn.classList.add('active');
+        cards.sort((a, b) => {
+            const da = a.dataset.created || '';
+            const db = b.dataset.created || '';
+            return dir === 'asc' ? da.localeCompare(db) : db.localeCompare(da);
+        });
+    }
+
+    // Re-insert in sorted order (preserves hidden cards for filters)
+    cards.forEach(c => col.appendChild(c));
+}
+
+// ─────────────────────────────────────────────────────────
 // KANBAN DRAG-AND-DROP
 // ─────────────────────────────────────────────────────────
-(function () {
+function _initKanbanDrag() {
     let dragCard = null;
 
     document.querySelectorAll('.kb-draggable').forEach(card => {
@@ -4213,7 +4387,8 @@ document.querySelectorAll('.appr-info-tip').forEach(function(el) {
                 .catch(() => location.reload());
         });
     });
-})();
+}
+_initKanbanDrag();
 
 // ─────────────────────────────────────────────────────────────
 // AJAX HELPERS — replace all form-based page reloads
@@ -4268,6 +4443,55 @@ async function tmAjax(action, taskId, btn, extra) {
     } catch(e) { if (btn) { btn.disabled=false; btn.innerHTML=orig; } showToast('Network error', 'error'); }
 }
 
+async function refreshTasks(btn) {
+    const icon = document.getElementById('refreshIcon');
+    btn.disabled = true;
+    icon.style.animation = 'tmSpinRefresh .7s linear infinite';
+    try {
+        const res  = await fetch(location.pathname + '?tab=my&_frag=1', { credentials: 'same-origin' });
+        const html = await res.text();
+        const doc  = new DOMParser().parseFromString(html, 'text/html');
+        ['viewCards', 'viewTable', 'viewKanban'].forEach(id => {
+            const fresh = doc.getElementById(id);
+            const cur   = document.getElementById(id);
+            if (fresh && cur) cur.innerHTML = fresh.innerHTML;
+        });
+        const freshStats = doc.getElementById('taskStatsRow');
+        const curStats   = document.getElementById('taskStatsRow');
+        if (freshStats && curStats) curStats.outerHTML = freshStats.outerHTML;
+        _initKanbanDrag();
+        if (typeof window._tmApplyAll === 'function') window._tmApplyAll();
+        showToast('Tasks refreshed', 'success');
+    } catch(e) {
+        showToast('Failed to refresh — check connection', 'error');
+    } finally {
+        icon.style.animation = '';
+        btn.disabled = false;
+    }
+}
+
+// Partial page refresh — swaps task views + stats without full reload.
+// Uses ?_frag=1 which skips header/footer/modals: ~90% smaller response.
+async function _refreshTaskView() {
+    try {
+        const res  = await fetch(location.pathname + '?tab=my&_frag=1', { credentials: 'same-origin' });
+        const html = await res.text();
+        const doc  = new DOMParser().parseFromString(html, 'text/html');
+        ['viewCards', 'viewTable', 'viewKanban'].forEach(id => {
+            const fresh = doc.getElementById(id);
+            const cur   = document.getElementById(id);
+            if (fresh && cur) cur.innerHTML = fresh.innerHTML;
+        });
+        const freshStats = doc.getElementById('taskStatsRow');
+        const curStats   = document.getElementById('taskStatsRow');
+        if (freshStats && curStats) curStats.outerHTML = freshStats.outerHTML;
+        if (typeof _initKanbanDrag === 'function') _initKanbanDrag();
+        if (typeof window._tmApplyAll === 'function') window._tmApplyAll();
+    } catch(e) {
+        location.reload();
+    }
+}
+
 let _taskCreateInFlight = false;
 async function submitCreateTask(btn) {
     if (_taskCreateInFlight) return;
@@ -4295,9 +4519,48 @@ async function submitCreateTask(btn) {
             form.querySelectorAll('input[type=checkbox]').forEach(el => el.checked=false);
             btn.disabled=false; btn.innerHTML=orig;
             _taskCreateInFlight=false;
-            location.reload();
+            showToast('Task created and assigned!', 'success');
+            await _refreshTaskView();
         }
     } catch(e) { _taskCreateInFlight=false; btn.disabled=false; btn.innerHTML=orig; showToast('Network error', 'error'); }
+}
+
+let _ownTaskInFlight = false;
+async function submitOwnTask(btn) {
+    if (_ownTaskInFlight) return;
+    _ownTaskInFlight = true;
+    const form  = document.getElementById('ownTaskForm');
+    const title = form.querySelector('[name="title"]')?.value.trim();
+    if (!title) { _ownTaskInFlight = false; showAlert('Task title is required.', 'warning', 'Missing Title'); return; }
+    const orig = btn.innerHTML;
+    btn.disabled = true; btn.innerHTML = '<span class="hc-spinner"></span> Creating…';
+    const fd = new FormData();
+    fd.append('_ajax', '1');
+    fd.append('action', 'create_own_task');
+    form.querySelectorAll('[name]').forEach(el => {
+        if (el.name === 'action') return;
+        if (el.type === 'checkbox') { if (el.checked) fd.append(el.name, el.value); }
+        else fd.append(el.name, el.value);
+    });
+    try {
+        const r = await fetch('tasks.php', { method: 'POST', body: fd, credentials: 'same-origin' });
+        const d = await r.json();
+        if (!d.ok) {
+            _ownTaskInFlight = false; btn.disabled = false; btn.innerHTML = orig;
+            showToast(d.error || 'Failed to create task', 'error');
+        } else {
+            bootstrap.Modal.getInstance(document.getElementById('ownTaskModal'))?.hide();
+            form.querySelectorAll('input[type=text],input[type=date],input[type=number],textarea').forEach(el => el.value = '');
+            form.querySelectorAll('select').forEach(el => el.selectedIndex = 0);
+            form.querySelectorAll('input[type=checkbox]').forEach(el => el.checked = false);
+            _ownTaskInFlight = false; btn.disabled = false; btn.innerHTML = orig;
+            showToast('Task created!', 'success');
+            await _refreshTaskView();
+        }
+    } catch(e) {
+        _ownTaskInFlight = false; btn.disabled = false; btn.innerHTML = orig;
+        showToast('Network error', 'error');
+    }
 }
 
 async function submitApproveRequest(btn) {
@@ -4353,4 +4616,4 @@ async function submitRejectRequest(btn) {
 }
 </script>
 
-<?php include 'footer.php'; ?>
+<?php if (!$is_frag) include 'footer.php'; ?>
