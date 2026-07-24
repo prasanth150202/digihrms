@@ -40,6 +40,29 @@ $emp_user = $conn->prepare("SELECT id FROM users WHERE email=? LIMIT 1");
 $emp_user->execute([$emp['email']]);
 $emp_user_id = (int)($emp_user->fetchColumn() ?: 0);
 
+// Admin/HR reset of an employee's login password
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'admin_reset_password') {
+    if (!has_role('SUPER_ADMIN','HR_ADMIN')) {
+        set_flash('danger', 'You do not have permission to do that.');
+    } elseif (!$emp_user_id) {
+        set_flash('danger', 'This employee has no login account.');
+    } else {
+        $new     = $_POST['new_password'] ?? '';
+        $confirm = $_POST['confirm_password'] ?? '';
+        if (strlen($new) < 8) {
+            set_flash('danger', 'New password must be at least 8 characters.');
+        } elseif ($new !== $confirm) {
+            set_flash('danger', 'New password and confirm password do not match.');
+        } else {
+            $conn->prepare("UPDATE users SET password = ? WHERE id = ?")
+                 ->execute([password_hash($new, PASSWORD_DEFAULT), $emp_user_id]);
+            set_flash('success', "Password reset for {$emp['name']}.");
+        }
+    }
+    header("Location: employee_profile.php?id=" . $id);
+    exit;
+}
+
 // Points
 $pts     = pts_summary($conn, $id);
 $recent  = pts_recent($conn, $id, 15);
@@ -194,6 +217,10 @@ include 'header.php';
             <a href="change_password.php" class="btn btn-outline-secondary btn-sm mt-2 w-100">
                 <i class="bi bi-shield-lock me-1"></i>Change Password
             </a>
+            <?php elseif (has_role('SUPER_ADMIN','HR_ADMIN') && $emp_user_id): ?>
+            <button type="button" class="btn btn-outline-secondary btn-sm mt-2 w-100" data-bs-toggle="modal" data-bs-target="#resetPwdModal">
+                <i class="bi bi-shield-lock me-1"></i>Reset Password
+            </button>
             <?php endif; ?>
             <?php if (has_role('SUPER_ADMIN','HR_ADMIN')): ?>
             <hr>
@@ -561,6 +588,38 @@ async function runWorkflowOnPerson() {
     }
 }
 </script>
+<?php endif; ?>
+
+<?php if (has_role('SUPER_ADMIN','HR_ADMIN') && $emp_user_id && $page !== 'my_profile'): ?>
+<!-- Reset Password modal (admin/HR) -->
+<div class="modal fade" id="resetPwdModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+        <form method="POST" class="modal-content border-0 shadow-lg" style="border-radius:18px;">
+            <input type="hidden" name="action" value="admin_reset_password">
+            <div class="modal-header border-0 pb-0 pt-4 px-4">
+                <div>
+                    <h5 class="modal-title fw-bold mb-0">Reset Password</h5>
+                    <p class="text-muted small mb-0">Set a new password for <strong><?= sanitize($emp['name']) ?></strong>.</p>
+                </div>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body px-4 pt-3 pb-2">
+                <div class="mb-3">
+                    <label class="form-label small fw-semibold">New Password</label>
+                    <input type="password" name="new_password" class="form-control" placeholder="Min. 8 characters" required minlength="8">
+                </div>
+                <div class="mb-2">
+                    <label class="form-label small fw-semibold">Confirm New Password</label>
+                    <input type="password" name="confirm_password" class="form-control" placeholder="Re-enter new password" required minlength="8">
+                </div>
+            </div>
+            <div class="modal-footer border-0 px-4 pb-4 pt-2">
+                <button type="button" class="btn btn-light btn-sm" data-bs-dismiss="modal">Cancel</button>
+                <button type="submit" class="btn btn-primary btn-sm"><i class="bi bi-check-lg me-1"></i>Reset Password</button>
+            </div>
+        </form>
+    </div>
+</div>
 <?php endif; ?>
 
 <?php include 'footer.php'; ?>
