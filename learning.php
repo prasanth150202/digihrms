@@ -1,5 +1,6 @@
 <?php
 require_once 'config.php';
+require_once 'points_helper.php';
 require_login();
 $page      = 'learning';
 $pageTitle = 'Learning';
@@ -13,6 +14,39 @@ $is_tl     = has_role('TEAM_LEAD');
 $empR = $conn->prepare("SELECT e.id FROM employees e JOIN users u ON u.email=e.email WHERE u.id=? LIMIT 1");
 $empR->execute([$uid]);
 $my_emp_id = (int)($empR->fetchColumn() ?: 0);
+
+// Check if the self-log table has been migrated
+$log_table_ready = false;
+try {
+    $conn->query("SELECT 1 FROM hrms_learning_logs LIMIT 1");
+    $log_table_ready = true;
+} catch (PDOException $e) { $log_table_ready = false; }
+
+// ── Add a self-logged learning entry ────────────────────────────────────────
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'add_learning_log') {
+    if (!$my_emp_id) {
+        set_flash('danger', 'No employee record linked to your account.');
+    } elseif (!$log_table_ready) {
+        set_flash('danger', 'Learning log is not set up yet. Ask your Super Admin to run the migration.');
+    } elseif (!verify_csrf($_POST['csrf_token'] ?? '')) {
+        set_flash('danger', 'Invalid request. Please try again.');
+    } else {
+        $title     = trim($_POST['title'] ?? '');
+        $notes     = trim($_POST['notes'] ?? '');
+        $learnedOn = $_POST['learned_on'] ?? date('Y-m-d');
+        if ($title === '') {
+            set_flash('danger', 'Please enter a title for what you learned.');
+        } else {
+            $conn->prepare("INSERT INTO hrms_learning_logs (employee_id, title, notes, learned_on) VALUES (?,?,?,?)")
+                 ->execute([$my_emp_id, $title, $notes !== '' ? $notes : null, $learnedOn]);
+            $logId = (int)$conn->lastInsertId();
+            pts_award($conn, $my_emp_id, 'hrms_learning_self_logged', (string)$logId, 'learning_log', "Logged: $title");
+            set_flash('success', 'Nice — logged what you learned.');
+        }
+    }
+    header('Location: learning.php');
+    exit;
+}
 
 // ── Data for Employee view ─────────────────────────────────────────────────
 $my_learning_tasks = [];
@@ -56,9 +90,20 @@ if ($tables_ready && $my_emp_id) {
     } catch (PDOException $e) {}
 }
 
+// ── My self-logged learning entries ─────────────────────────────────────────
+$my_logs = [];
+if ($log_table_ready && $my_emp_id) {
+    try {
+        $ml = $conn->prepare("SELECT * FROM hrms_learning_logs WHERE employee_id=? ORDER BY learned_on DESC, created_at DESC LIMIT 50");
+        $ml->execute([$my_emp_id]);
+        $my_logs = $ml->fetchAll();
+    } catch (PDOException $e) {}
+}
+
 // ── Data for TL view ──────────────────────────────────────────────────────
 $team_learning = [];
 $team_pending_reviews = [];
+$team_logs = [];
 if ($is_tl || $is_admin) {
     // Find team members (users in same dept whose TL is $uid, or all for admin)
     if ($is_admin) {
@@ -118,6 +163,22 @@ if ($is_tl || $is_admin) {
                 ORDER BY qa.attempted_at ASC
             ");
             $team_pending_reviews = $pr->fetchAll();
+        } catch (PDOException $e) {}
+    }
+
+    if ($teamUserIds && $log_table_ready) {
+        $in = implode(',', array_map('intval', $teamUserIds));
+        try {
+            $tlog = $conn->query("
+                SELECT hl.*, e.name as emp_name
+                FROM hrms_learning_logs hl
+                JOIN employees e ON e.id = hl.employee_id
+                JOIN users u ON u.email = e.email
+                WHERE u.id IN ({$in})
+                ORDER BY hl.learned_on DESC, hl.created_at DESC
+                LIMIT 50
+            ");
+            $team_logs = $tlog->fetchAll();
         } catch (PDOException $e) {}
     }
 }
@@ -188,13 +249,66 @@ include 'header.php';
 </div>
 <?php endif; ?>
 
+<?php if (!$log_table_ready && has_role('SUPER_ADMIN')): ?>
+<div class="alert alert-warning d-flex align-items-center gap-3 mb-4" style="border-radius:12px;">
+    <i class="bi bi-exclamation-triangle-fill fs-4"></i>
+    <div>
+        <strong>Learning log table not found.</strong>
+        Run the migration to let people log what they've learned:
+        <a href="migrate_learning_log.php" class="btn btn-sm btn-warning ms-2" style="border-radius:6px;">Run Migration →</a>
+    </div>
+</div>
+<?php endif; ?>
+
 <!-- Header -->
 <div class="d-flex align-items-center justify-content-between mb-4">
     <div>
         <h5 class="mb-0 fw-bold" style="color:var(--text-primary);"><i class="bi bi-mortarboard-fill me-2" style="color:#7c3aed;"></i>Learning</h5>
         <div style="font-size:12px;color:var(--text-muted);">Track learning tasks, quiz progress, and earned badges</div>
     </div>
+    <?php if ($my_emp_id && $log_table_ready): ?>
+    <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#addLearningLogModal" style="border-radius:8px;">
+        <i class="bi bi-plus-lg me-1"></i>Log what you learned
+    </button>
+    <?php endif; ?>
 </div>
+
+<?php if ($my_emp_id && $log_table_ready): ?>
+<!-- Add Learning Log modal -->
+<div class="modal fade" id="addLearningLogModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+        <form method="POST" class="modal-content border-0 shadow-lg" style="border-radius:18px;">
+            <input type="hidden" name="action" value="add_learning_log">
+            <input type="hidden" name="csrf_token" value="<?= sanitize(csrf_token()) ?>">
+            <div class="modal-header border-0 pb-0 pt-4 px-4">
+                <div>
+                    <h5 class="modal-title fw-bold mb-0">Log what you learned</h5>
+                    <p class="text-muted small mb-0">A quick note for yourself — no approval needed.</p>
+                </div>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body px-4 pt-3 pb-2">
+                <div class="mb-3">
+                    <label class="form-label small fw-semibold">What did you learn?</label>
+                    <input type="text" name="title" class="form-control" placeholder="e.g. How to use Figma auto-layout" required maxlength="200">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label small fw-semibold">Notes (optional)</label>
+                    <textarea name="notes" class="form-control" rows="3" placeholder="Any detail, link, or takeaway"></textarea>
+                </div>
+                <div class="mb-2">
+                    <label class="form-label small fw-semibold">Date</label>
+                    <input type="date" name="learned_on" class="form-control" value="<?= date('Y-m-d') ?>" max="<?= date('Y-m-d') ?>" required>
+                </div>
+            </div>
+            <div class="modal-footer border-0 px-4 pb-4 pt-2">
+                <button type="button" class="btn btn-light btn-sm" data-bs-dismiss="modal">Cancel</button>
+                <button type="submit" class="btn btn-primary btn-sm"><i class="bi bi-check-lg me-1"></i>Save</button>
+            </div>
+        </form>
+    </div>
+</div>
+<?php endif; ?>
 
 <?php if (!$is_admin && !$is_tl): ?>
 <!-- ══════════════════════════════════════════════════════ EMPLOYEE VIEW -->
@@ -308,6 +422,35 @@ include 'header.php';
     </div>
 </div>
 
+<!-- My Learning Log (self-logged) -->
+<?php if ($log_table_ready): ?>
+<div class="card border-0 shadow-sm mt-4" style="border-radius:14px;">
+    <div class="card-body p-4">
+        <h6 class="fw-bold mb-3"><i class="bi bi-pencil-square me-2"></i>My Learning Log</h6>
+        <?php if (!$my_logs): ?>
+        <div class="text-center py-4 text-muted">
+            <i class="bi bi-journal-plus" style="font-size:2rem;opacity:.3;display:block;margin-bottom:8px;"></i>
+            Nothing logged yet — hit "Log what you learned" above.
+        </div>
+        <?php else: ?>
+        <div class="list-group list-group-flush">
+        <?php foreach ($my_logs as $log): ?>
+            <div class="list-group-item px-0" style="border-color:var(--card-bdr);">
+                <div class="d-flex justify-content-between align-items-start">
+                    <div class="fw-semibold small"><?= sanitize($log['title']) ?></div>
+                    <div class="small text-muted"><?= date('d M Y', strtotime($log['learned_on'])) ?></div>
+                </div>
+                <?php if ($log['notes']): ?>
+                <div class="small text-muted mt-1"><?= nl2br(sanitize($log['notes'])) ?></div>
+                <?php endif; ?>
+            </div>
+        <?php endforeach; ?>
+        </div>
+        <?php endif; ?>
+    </div>
+</div>
+<?php endif; ?>
+
 <?php else: ?>
 <!-- ══════════════════════════════════════════════════════ TL / ADMIN VIEW -->
 
@@ -397,6 +540,31 @@ $badge_count   = $is_admin ? count($all_badge_awards) : count(array_filter($team
         <?php endif; ?>
     </div>
 </div>
+
+<?php if ($log_table_ready): ?>
+<div class="card border-0 shadow-sm mt-4" style="border-radius:14px;">
+    <div class="card-body p-4">
+        <h6 class="fw-bold mb-3"><i class="bi bi-pencil-square me-2"></i>Team Learning Log</h6>
+        <?php if (!$team_logs): ?>
+        <div class="text-center py-4 text-muted">Nobody's logged anything yet.</div>
+        <?php else: ?>
+        <div class="list-group list-group-flush">
+        <?php foreach ($team_logs as $log): ?>
+            <div class="list-group-item px-0" style="border-color:var(--card-bdr);">
+                <div class="d-flex justify-content-between align-items-start">
+                    <div class="small"><span class="fw-semibold"><?= sanitize($log['emp_name']) ?></span> — <?= sanitize($log['title']) ?></div>
+                    <div class="small text-muted"><?= date('d M Y', strtotime($log['learned_on'])) ?></div>
+                </div>
+                <?php if ($log['notes']): ?>
+                <div class="small text-muted mt-1"><?= nl2br(sanitize($log['notes'])) ?></div>
+                <?php endif; ?>
+            </div>
+        <?php endforeach; ?>
+        </div>
+        <?php endif; ?>
+    </div>
+</div>
+<?php endif; ?>
 </div>
 
 <!-- ── TAB: Pending Reviews ───────────────────────────────────────────── -->
@@ -513,6 +681,33 @@ $badge_count   = $is_admin ? count($all_badge_awards) : count(array_filter($team
     </div>
     <?php else: ?>
     <div class="text-center py-5 text-muted"><i class="bi bi-mortarboard" style="font-size:2rem;opacity:.3;display:block;margin-bottom:8px;"></i>No learning tasks assigned to you.</div>
+    <?php endif; ?>
+
+    <?php if ($log_table_ready): ?>
+    <div class="card border-0 shadow-sm mt-4" style="border-radius:14px;">
+        <div class="card-body p-4">
+            <h6 class="fw-bold mb-3"><i class="bi bi-pencil-square me-2"></i>My Learning Log</h6>
+            <?php if (!$my_logs): ?>
+            <div class="text-center py-4 text-muted">
+                Nothing logged yet — hit "Log what you learned" above.
+            </div>
+            <?php else: ?>
+            <div class="list-group list-group-flush">
+            <?php foreach ($my_logs as $log): ?>
+                <div class="list-group-item px-0" style="border-color:var(--card-bdr);">
+                    <div class="d-flex justify-content-between align-items-start">
+                        <div class="fw-semibold small"><?= sanitize($log['title']) ?></div>
+                        <div class="small text-muted"><?= date('d M Y', strtotime($log['learned_on'])) ?></div>
+                    </div>
+                    <?php if ($log['notes']): ?>
+                    <div class="small text-muted mt-1"><?= nl2br(sanitize($log['notes'])) ?></div>
+                    <?php endif; ?>
+                </div>
+            <?php endforeach; ?>
+            </div>
+            <?php endif; ?>
+        </div>
+    </div>
     <?php endif; ?>
 </div>
 
