@@ -52,63 +52,61 @@ function _learning_log_history_note(PDO $conn, int $logId, int $pct, string $sta
 function _render_my_learning_log_item(array $log, bool $log_status_ready, bool $log_progress_ready): void {
     $status = $log['status'] ?? 'completed';
     ?>
-    <div class="list-group-item px-0" style="border-color:var(--card-bdr);">
-        <div class="d-flex justify-content-between align-items-start gap-2">
+    <div class="course-card">
+        <div class="course-card-top">
             <div class="flex-grow-1">
-                <div class="fw-semibold small"><?= sanitize($log['title']) ?></div>
+                <div class="course-title"><?= sanitize($log['title']) ?></div>
                 <?php if ($log_status_ready): ?>
-                <div class="small text-muted mt-1 d-flex align-items-center gap-2 flex-wrap">
+                <div class="course-meta">
                     <?php if ($status === 'pursuing'): ?>
-                    <span class="badge" style="background:#fef9c3;color:#854d0e;">🟡 Pursuing</span>
-                    <span>Started <?= date('d M Y', strtotime($log['learned_on'])) ?></span>
+                    <span class="status-pill pursuing">🟡 Pursuing</span>
+                    <span><i class="bi bi-calendar3 me-1"></i>Started <?= date('d M Y', strtotime($log['learned_on'])) ?></span>
                     <?php elseif ($status === 'dropped'): ?>
-                    <span class="badge" style="background:#f1f5f9;color:#64748b;">⛔ Dropped</span>
-                    <span>Started <?= date('d M Y', strtotime($log['learned_on'])) ?></span>
+                    <span class="status-pill dropped">⛔ Dropped</span>
+                    <span><i class="bi bi-calendar3 me-1"></i>Started <?= date('d M Y', strtotime($log['learned_on'])) ?></span>
                     <?php else: ?>
-                    <span class="badge" style="background:#dcfce7;color:#166534;">✅ Completed</span>
-                    <span><?= date('d M Y', strtotime($log['learned_on'])) ?> → <?= $log['completed_on'] ? date('d M Y', strtotime($log['completed_on'])) : '—' ?></span>
+                    <span class="status-pill completed">✅ Completed</span>
+                    <span><i class="bi bi-calendar3 me-1"></i><?= date('d M Y', strtotime($log['learned_on'])) ?> → <?= $log['completed_on'] ? date('d M Y', strtotime($log['completed_on'])) : '—' ?></span>
                     <?php endif; ?>
                 </div>
                 <?php if ($log_progress_ready && $status === 'pursuing'): ?>
-                <div class="progress mt-2" style="height:6px;border-radius:4px;max-width:220px;">
-                    <div class="progress-bar" style="width:<?= (int)$log['progress_pct'] ?>%;background:#7c3aed;border-radius:4px;"></div>
-                </div>
-                <div class="small text-muted mt-1"><?= (int)$log['progress_pct'] ?>% complete</div>
+                <div class="course-progress-track"><div class="course-progress-fill" style="width:<?= (int)$log['progress_pct'] ?>%;"></div></div>
+                <div class="course-progress-label"><?= (int)$log['progress_pct'] ?>% complete</div>
                 <?php endif; ?>
                 <?php if ($log_progress_ready && $status === 'completed' && !empty($log['proof_url'])): ?>
-                <div class="small mt-1"><a href="<?= sanitize($log['proof_url']) ?>" target="_blank" rel="noopener noreferrer">🔗 Proof of completion</a></div>
+                <a href="<?= sanitize($log['proof_url']) ?>" target="_blank" rel="noopener noreferrer" class="course-proof mt-2"><i class="bi bi-patch-check-fill" style="color:#16a34a;"></i>Proof of completion</a>
                 <?php endif; ?>
                 <?php else: ?>
-                <div class="small text-muted mt-1"><?= date('d M Y', strtotime($log['learned_on'])) ?></div>
+                <div class="course-meta"><i class="bi bi-calendar3 me-1"></i><?= date('d M Y', strtotime($log['learned_on'])) ?></div>
                 <?php endif; ?>
             </div>
             <?php if ($status === 'pursuing'): ?>
                 <?php if ($log_progress_ready): ?>
-                <div class="d-flex flex-column gap-1">
-                    <button type="button" class="btn btn-sm btn-outline-primary" style="font-size:11px;border-radius:6px;white-space:nowrap;" data-bs-toggle="modal" data-bs-target="#lm-progress-<?= (int)$log['id'] ?>">Update %</button>
-                    <button type="button" class="btn btn-sm btn-outline-success" style="font-size:11px;border-radius:6px;white-space:nowrap;" data-bs-toggle="modal" data-bs-target="#lm-complete-<?= (int)$log['id'] ?>">Mark Completed</button>
-                    <button type="button" class="btn btn-sm btn-outline-danger" style="font-size:11px;border-radius:6px;white-space:nowrap;" data-bs-toggle="modal" data-bs-target="#lm-drop-<?= (int)$log['id'] ?>">Drop</button>
+                <div class="course-actions">
+                    <button type="button" class="btn btn-outline-primary" data-bs-toggle="modal" data-bs-target="#lm-progress-<?= (int)$log['id'] ?>"><i class="bi bi-graph-up-arrow me-1"></i>Update %</button>
+                    <button type="button" class="btn btn-outline-success" data-bs-toggle="modal" data-bs-target="#lm-complete-<?= (int)$log['id'] ?>"><i class="bi bi-check2-circle me-1"></i>Complete</button>
+                    <button type="button" class="btn btn-outline-danger" data-bs-toggle="modal" data-bs-target="#lm-drop-<?= (int)$log['id'] ?>"><i class="bi bi-x-circle me-1"></i>Drop</button>
                 </div>
                 <?php elseif ($log_status_ready): ?>
                 <form method="POST" class="m-0">
                     <input type="hidden" name="action" value="mark_learning_log_completed">
                     <input type="hidden" name="id" value="<?= (int)$log['id'] ?>">
                     <input type="hidden" name="csrf_token" value="<?= sanitize(csrf_token()) ?>">
-                    <button type="submit" class="btn btn-sm btn-outline-success" style="font-size:11px;border-radius:6px;white-space:nowrap;">Mark Completed</button>
+                    <button type="submit" class="btn btn-outline-success" style="font-size:11px;border-radius:8px;white-space:nowrap;">Mark Completed</button>
                 </form>
                 <?php endif; ?>
             <?php endif; ?>
         </div>
         <?php if ($log['notes']): ?>
-        <div class="small text-muted mt-1"><?= nl2br(sanitize($log['notes'])) ?></div>
+        <div class="course-notes"><?= nl2br(sanitize($log['notes'])) ?></div>
         <?php endif; ?>
         <?php if ($log_progress_ready && !empty($log['history'])): ?>
-        <details class="mt-2">
-            <summary class="small text-muted" style="cursor:pointer;">History (<?= count($log['history']) ?>)</summary>
-            <div class="mt-1">
+        <details class="course-history">
+            <summary>History · <?= count($log['history']) ?> update<?= count($log['history']) === 1 ? '' : 's' ?></summary>
+            <div class="timeline">
             <?php foreach (array_reverse($log['history']) as $h): ?>
-                <div class="small text-muted" style="padding:2px 0;">
-                    <?= date('d M Y, h:i A', strtotime($h['created_at'])) ?> —
+                <div class="timeline-item">
+                    <span class="t-date"><?= date('d M Y, h:i A', strtotime($h['created_at'])) ?></span> —
                     <?php if ($h['status'] === 'completed'): ?>Completed (100%)
                     <?php elseif ($h['status'] === 'dropped'): ?>Dropped at <?= (int)$h['progress_pct'] ?>%
                     <?php else: ?><?= (int)$h['progress_pct'] ?>%
@@ -491,19 +489,103 @@ include 'header.php';
 ?>
 
 <style>
-.learn-badge-pill {
-    display:inline-flex;align-items:center;gap:8px;
-    padding:8px 14px;border-radius:30px;
-    background:rgba(124,58,237,.08);border:1px solid rgba(124,58,237,.2);
+/* ── Header banner ──────────────────────────────────────────────────── */
+.learn-banner {
+    background:linear-gradient(135deg, rgba(124,58,237,.10), rgba(124,58,237,.02));
+    border:1px solid rgba(124,58,237,.18);
+    border-radius:18px;
+    padding:22px 26px;
+    margin-bottom:24px;
+    display:flex;align-items:center;justify-content:space-between;gap:16px;
+    flex-wrap:wrap;
 }
-.learn-badge-pill .bi-icon { font-size:1.4rem;line-height:1; }
+.learn-banner-icon {
+    width:52px;height:52px;border-radius:14px;flex:0 0 auto;
+    background:linear-gradient(135deg,#7c3aed,#a78bfa);
+    display:flex;align-items:center;justify-content:center;
+    font-size:1.6rem;color:#fff;box-shadow:0 6px 16px rgba(124,58,237,.35);
+}
+.learn-banner h5 { font-size:1.15rem; }
+.learn-banner .sub { font-size:12.5px;color:var(--text-muted);margin-top:2px; }
+
+/* ── Stat cards ─────────────────────────────────────────────────────── */
+.stat-card {
+    background:var(--card-bg);border:1px solid var(--card-bdr);border-radius:14px;
+    padding:18px 20px;text-align:center;position:relative;overflow:hidden;
+}
+.stat-card::before {
+    content:'';position:absolute;top:0;left:0;right:0;height:3px;
+    background:var(--stat-accent,#7c3aed);
+}
+.stat-card .val { font-size:2.1rem;font-weight:800;color:var(--text-primary);line-height:1; }
+.stat-card .lbl { font-size:11px;color:var(--text-muted);margin-top:6px;text-transform:uppercase;letter-spacing:.04em;font-weight:600; }
+
+/* ── Tabs (segmented control) ──────────────────────────────────────── */
+.learn-tabs { background:var(--body-bg);border:1px solid var(--card-bdr);border-radius:12px;padding:4px;display:inline-flex;gap:2px;margin-bottom:24px;flex-wrap:wrap; }
+.learn-tab {
+    padding:8px 16px;border-radius:9px;font-size:13px;font-weight:600;cursor:pointer;
+    border:none;background:none;color:var(--text-secondary);position:relative;
+    display:inline-flex;align-items:center;transition:background .15s,color .15s;
+}
+.learn-tab:hover { background:rgba(124,58,237,.08); }
+.learn-tab.active { background:#7c3aed;color:#fff;box-shadow:0 3px 10px rgba(124,58,237,.3); }
+
+/* ── Section card shell ────────────────────────────────────────────── */
+.learn-card { background:var(--card-bg);border:1px solid var(--card-bdr);border-radius:16px;overflow:hidden; }
+.learn-card-head { padding:18px 22px;border-bottom:1px solid var(--card-bdr);display:flex;align-items:center;justify-content:space-between;gap:10px; }
+.learn-card-body { padding:20px 22px; }
+.learn-card-title { font-size:14px;font-weight:700;color:var(--text-primary);display:flex;align-items:center;gap:8px;margin:0; }
+
+/* ── Badges earned (pill) ──────────────────────────────────────────── */
+.learn-badge-pill {
+    display:inline-flex;align-items:center;gap:10px;
+    padding:10px 16px;border-radius:14px;
+    background:linear-gradient(135deg, rgba(124,58,237,.10), rgba(124,58,237,.03));
+    border:1px solid rgba(124,58,237,.2);
+}
+.learn-badge-pill .bi-icon { font-size:1.5rem;line-height:1; }
 .learn-badge-pill .name    { font-size:13px;font-weight:700;color:#7c3aed; }
-.learn-badge-pill .date    { font-size:10px;color:var(--text-muted); }
-.stat-card { background:var(--card-bg);border:1px solid var(--card-bdr);border-radius:12px;padding:16px 20px;text-align:center; }
-.stat-card .val { font-size:2rem;font-weight:800;color:var(--text-primary);line-height:1; }
-.stat-card .lbl { font-size:11px;color:var(--text-muted);margin-top:4px; }
-.learn-tab { padding:7px 18px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;border:none;background:none;color:var(--text-secondary); }
-.learn-tab.active { background:var(--primary);color:#fff; }
+.learn-badge-pill .date    { font-size:10.5px;color:var(--text-muted);margin-top:1px; }
+
+/* ── Status pills ───────────────────────────────────────────────────── */
+.status-pill { display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:700;white-space:nowrap; }
+.status-pill.pursuing  { background:#fef9c3;color:#854d0e; }
+.status-pill.completed { background:#dcfce7;color:#166534; }
+.status-pill.dropped   { background:#f1f5f9;color:#64748b; }
+
+/* ── Course cards (learning log entries) ───────────────────────────── */
+.course-card {
+    background:var(--body-bg);border:1px solid var(--card-bdr);border-radius:14px;
+    padding:16px 18px;margin-bottom:12px;transition:border-color .15s;
+}
+.course-card:hover { border-color:rgba(124,58,237,.35); }
+.course-card:last-child { margin-bottom:0; }
+.course-card-top { display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap; }
+.course-title { font-size:14px;font-weight:700;color:var(--text-primary); }
+.course-meta { font-size:12px;color:var(--text-muted);display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:6px; }
+.course-progress-track { height:7px;border-radius:6px;background:var(--card-bdr);overflow:hidden;max-width:260px;margin-top:10px; }
+.course-progress-fill { height:100%;border-radius:6px;background:linear-gradient(90deg,#7c3aed,#a78bfa);transition:width .3s; }
+.course-progress-label { font-size:11px;color:var(--text-muted);margin-top:4px;font-weight:600; }
+.course-notes { font-size:12.5px;color:var(--text-muted);margin-top:10px;padding:10px 12px;background:var(--card-bg);border-radius:10px;border:1px solid var(--card-bdr); }
+.course-actions { display:flex;gap:6px;flex-wrap:wrap; }
+.course-actions .btn { font-size:11px;border-radius:8px;padding:5px 11px;white-space:nowrap; }
+.course-proof { font-size:12px;font-weight:600;display:inline-flex;align-items:center;gap:4px; }
+
+/* ── History timeline ───────────────────────────────────────────────── */
+.course-history summary { font-size:11.5px;color:var(--text-muted);cursor:pointer;font-weight:600;list-style:none;display:inline-flex;align-items:center;gap:4px;margin-top:10px; }
+.course-history summary::-webkit-details-marker { display:none; }
+.course-history summary::before { content:'▸';transition:transform .15s; }
+.course-history[open] summary::before { transform:rotate(90deg); }
+.timeline { margin-top:10px;padding-left:14px;border-left:2px solid var(--card-bdr); }
+.timeline-item { position:relative;padding:0 0 12px 16px;font-size:12px;color:var(--text-muted); }
+.timeline-item:last-child { padding-bottom:0; }
+.timeline-item::before { content:'';position:absolute;left:-19px;top:4px;width:8px;height:8px;border-radius:50%;background:#7c3aed; }
+.timeline-item .t-date { font-weight:700;color:var(--text-primary); }
+
+/* ── Empty state ────────────────────────────────────────────────────── */
+.learn-empty { text-align:center;padding:36px 20px;color:var(--text-muted); }
+.learn-empty i { font-size:2.2rem;opacity:.25;display:block;margin-bottom:10px; }
+.learn-empty p { font-size:13px;margin:0; }
 </style>
 
 <?php if (!$tables_ready): ?>
@@ -533,13 +615,16 @@ include 'header.php';
 <?php endif; ?>
 
 <!-- Header -->
-<div class="d-flex align-items-center justify-content-between mb-4">
-    <div>
-        <h5 class="mb-0 fw-bold" style="color:var(--text-primary);"><i class="bi bi-mortarboard-fill me-2" style="color:#7c3aed;"></i>Learning</h5>
-        <div style="font-size:12px;color:var(--text-muted);">Track learning tasks, quiz progress, and earned badges</div>
+<div class="learn-banner">
+    <div class="d-flex align-items-center gap-3">
+        <div class="learn-banner-icon"><i class="bi bi-mortarboard-fill"></i></div>
+        <div>
+            <h5 class="mb-0 fw-bold">Learning</h5>
+            <div class="sub">Track learning tasks, course progress, and earned badges</div>
+        </div>
     </div>
     <?php if ($my_emp_id && $log_table_ready): ?>
-    <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#addLearningLogModal" style="border-radius:8px;">
+    <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addLearningLogModal" style="border-radius:10px;font-weight:600;font-size:13px;">
         <i class="bi bi-plus-lg me-1"></i>Update Your Course
     </button>
     <?php endif; ?>
@@ -611,19 +696,19 @@ include 'header.php';
 <!-- Stats row -->
 <div class="row g-3 mb-4">
     <div class="col-4">
-        <div class="stat-card">
+        <div class="stat-card" style="--stat-accent:#7c3aed;">
             <div class="val" style="color:#7c3aed;"><?= count($my_badges) ?></div>
             <div class="lbl">Badges Earned</div>
         </div>
     </div>
     <div class="col-4">
-        <div class="stat-card">
+        <div class="stat-card" style="--stat-accent:#16a34a;">
             <div class="val" style="color:#16a34a;"><?= count(array_filter($my_learning_tasks, fn($t) => $t['status']==='DONE')) ?></div>
             <div class="lbl">Completed</div>
         </div>
     </div>
     <div class="col-4">
-        <div class="stat-card">
+        <div class="stat-card" style="--stat-accent:#f59e0b;">
             <div class="val" style="color:#f59e0b;"><?= count(array_filter($my_learning_tasks, fn($t) => $t['status']!=='DONE')) ?></div>
             <div class="lbl">In Progress</div>
         </div>
@@ -632,9 +717,9 @@ include 'header.php';
 
 <!-- My Badges -->
 <?php if ($my_badges): ?>
-<div class="card border-0 shadow-sm mb-4" style="border-radius:14px;">
-    <div class="card-body p-4">
-        <h6 class="fw-bold mb-3" style="color:#7c3aed;"><i class="bi bi-trophy-fill me-2"></i>My Badges</h6>
+<div class="learn-card mb-4">
+    <div class="learn-card-body">
+        <h6 class="learn-card-title mb-3" style="color:#7c3aed;"><i class="bi bi-trophy-fill me-2"></i>My Badges</h6>
         <div class="d-flex flex-wrap gap-2">
             <?php foreach ($my_badges as $b): ?>
             <div class="learn-badge-pill" title="From: <?= sanitize($b['task_title'] ?? '') ?>">
@@ -651,13 +736,13 @@ include 'header.php';
 <?php endif; ?>
 
 <!-- My Learning Tasks -->
-<div class="card border-0 shadow-sm" style="border-radius:14px;">
-    <div class="card-body p-4">
-        <h6 class="fw-bold mb-3"><i class="bi bi-journal-check me-2"></i>My Learning Tasks</h6>
+<div class="learn-card">
+    <div class="learn-card-body">
+        <h6 class="learn-card-title mb-3"><i class="bi bi-journal-check me-2"></i>My Learning Tasks</h6>
         <?php if (!$my_learning_tasks): ?>
-        <div class="text-center py-5 text-muted">
-            <i class="bi bi-mortarboard" style="font-size:2.5rem;opacity:.3;display:block;margin-bottom:8px;"></i>
-            No learning tasks assigned yet.
+        <div class="learn-empty">
+            <i class="bi bi-mortarboard"></i>
+            <p>No learning tasks assigned yet.</p>
         </div>
         <?php else: ?>
         <div class="table-responsive">
@@ -719,13 +804,13 @@ include 'header.php';
 
 <!-- My Learning Log (self-logged) -->
 <?php if ($log_table_ready): ?>
-<div class="card border-0 shadow-sm mt-4" style="border-radius:14px;">
-    <div class="card-body p-4">
-        <h6 class="fw-bold mb-3"><i class="bi bi-pencil-square me-2"></i>My Learning Log</h6>
+<div class="learn-card mt-4">
+    <div class="learn-card-body">
+        <h6 class="learn-card-title mb-3"><i class="bi bi-pencil-square me-2"></i>My Learning Log</h6>
         <?php if (!$my_logs): ?>
-        <div class="text-center py-4 text-muted">
-            <i class="bi bi-journal-plus" style="font-size:2rem;opacity:.3;display:block;margin-bottom:8px;"></i>
-            Nothing logged yet — hit "Update Your Course" above.
+        <div class="learn-empty">
+            <i class="bi bi-journal-plus"></i>
+            <p>Nothing logged yet — hit "Update Your Course" above.</p>
         </div>
         <?php else: ?>
         <div class="list-group list-group-flush">
@@ -740,7 +825,7 @@ include 'header.php';
 <!-- ══════════════════════════════════════════════════════ TL / ADMIN VIEW -->
 
 <!-- Tabs -->
-<div class="d-flex gap-2 mb-4">
+<div class="learn-tabs">
     <button class="learn-tab active" onclick="showTab('team',this)">
         <i class="bi bi-people me-1"></i><?= $is_admin ? 'All Learners' : 'My Team' ?>
     </button>
@@ -774,16 +859,16 @@ $pending_count = count(array_filter($team_learning, fn($t) => $t['status']!=='DO
 $badge_count   = $is_admin ? count($all_badge_awards) : count(array_filter($team_learning, fn($t) => $t['tl_approved']==='1'));
 ?>
 <div class="row g-3 mb-4">
-    <div class="col-4"><div class="stat-card"><div class="val" style="color:#16a34a;"><?= $done_count ?></div><div class="lbl">Completed</div></div></div>
-    <div class="col-4"><div class="stat-card"><div class="val" style="color:#f59e0b;"><?= $pending_count ?></div><div class="lbl">In Progress</div></div></div>
-    <div class="col-4"><div class="stat-card"><div class="val" style="color:#7c3aed;"><?= $badge_count ?></div><div class="lbl">Badges Awarded</div></div></div>
+    <div class="col-4"><div class="stat-card" style="--stat-accent:#16a34a;"><div class="val" style="color:#16a34a;"><?= $done_count ?></div><div class="lbl">Completed</div></div></div>
+    <div class="col-4"><div class="stat-card" style="--stat-accent:#f59e0b;"><div class="val" style="color:#f59e0b;"><?= $pending_count ?></div><div class="lbl">In Progress</div></div></div>
+    <div class="col-4"><div class="stat-card" style="--stat-accent:#7c3aed;"><div class="val" style="color:#7c3aed;"><?= $badge_count ?></div><div class="lbl">Badges Awarded</div></div></div>
 </div>
 
-<div class="card border-0 shadow-sm" style="border-radius:14px;">
-    <div class="card-body p-4">
-        <h6 class="fw-bold mb-3"><i class="bi bi-journal-check me-2"></i><?= $is_admin ? 'All Learning Tasks' : 'Team Learning Tasks' ?></h6>
+<div class="learn-card">
+    <div class="learn-card-body">
+        <h6 class="learn-card-title mb-3"><i class="bi bi-journal-check me-2"></i><?= $is_admin ? 'All Learning Tasks' : 'Team Learning Tasks' ?></h6>
         <?php if (!$team_learning): ?>
-        <div class="text-center py-5 text-muted"><i class="bi bi-mortarboard" style="font-size:2rem;opacity:.3;display:block;margin-bottom:8px;"></i>No learning tasks found.</div>
+        <div class="learn-empty"><i class="bi bi-mortarboard"></i><p>No learning tasks found.</p></div>
         <?php else: ?>
         <div class="table-responsive">
         <table class="table table-hover mb-0">
@@ -837,11 +922,11 @@ $badge_count   = $is_admin ? count($all_badge_awards) : count(array_filter($team
 </div>
 
 <?php if ($log_table_ready): ?>
-<div class="card border-0 shadow-sm mt-4" style="border-radius:14px;">
-    <div class="card-body p-4">
-        <h6 class="fw-bold mb-3"><i class="bi bi-pencil-square me-2"></i>Team Learning Log</h6>
+<div class="learn-card mt-4">
+    <div class="learn-card-body">
+        <h6 class="learn-card-title mb-3"><i class="bi bi-pencil-square me-2"></i>Team Learning Log</h6>
         <?php if (!$team_logs): ?>
-        <div class="text-center py-4 text-muted">Nobody's logged anything yet.</div>
+        <div class="learn-empty"><i class="bi bi-journal-plus"></i><p>Nobody's logged anything yet.</p></div>
         <?php else: ?>
         <div class="list-group list-group-flush">
         <?php foreach ($team_logs as $log): ?>
@@ -882,9 +967,9 @@ $badge_count   = $is_admin ? count($all_badge_awards) : count(array_filter($team
 <!-- ── TAB: Pending Reviews ───────────────────────────────────────────── -->
 <?php if ($team_pending_reviews): ?>
 <div id="tab-reviews" style="display:none;">
-    <div class="card border-0 shadow-sm" style="border-radius:14px;">
-        <div class="card-body p-4">
-            <h6 class="fw-bold mb-3" style="color:#b45309;"><i class="bi bi-clipboard-check me-2"></i>Quiz Answers Awaiting Your Review</h6>
+    <div class="learn-card">
+        <div class="learn-card-body">
+            <h6 class="learn-card-title mb-3" style="color:#b45309;"><i class="bi bi-clipboard-check me-2"></i>Quiz Answers Awaiting Your Review</h6>
             <?php foreach ($team_pending_reviews as $pr): ?>
             <div class="mb-3 p-3 rounded" style="background:var(--body-bg);border:1px solid var(--card-bdr);">
                 <div class="d-flex justify-content-between align-items-center mb-1">
@@ -910,9 +995,9 @@ $badge_count   = $is_admin ? count($all_badge_awards) : count(array_filter($team
 <div id="tab-stats" style="display:none;">
     <div class="row g-4">
         <div class="col-md-6">
-            <div class="card border-0 shadow-sm" style="border-radius:14px;">
-                <div class="card-body p-4">
-                    <h6 class="fw-bold mb-3"><i class="bi bi-bar-chart me-2"></i>Badge Completion Rates</h6>
+            <div class="learn-card">
+                <div class="learn-card-body">
+                    <h6 class="learn-card-title mb-3"><i class="bi bi-bar-chart me-2"></i>Badge Completion Rates</h6>
                     <?php if (!$completion_stats): ?>
                     <div class="text-muted small text-center py-4">No badges yet.</div>
                     <?php else: ?>
@@ -933,9 +1018,9 @@ $badge_count   = $is_admin ? count($all_badge_awards) : count(array_filter($team
             </div>
         </div>
         <div class="col-md-6">
-            <div class="card border-0 shadow-sm" style="border-radius:14px;">
-                <div class="card-body p-4">
-                    <h6 class="fw-bold mb-3"><i class="bi bi-trophy me-2"></i>Recent Badge Awards</h6>
+            <div class="learn-card">
+                <div class="learn-card-body">
+                    <h6 class="learn-card-title mb-3"><i class="bi bi-trophy me-2"></i>Recent Badge Awards</h6>
                     <?php if (!$all_badge_awards): ?>
                     <div class="text-muted small text-center py-4">No badges awarded yet.</div>
                     <?php else: ?>
@@ -960,9 +1045,9 @@ $badge_count   = $is_admin ? count($all_badge_awards) : count(array_filter($team
 <!-- ── TAB: My Own Learning (for TL/Admin) ───────────────────────────── -->
 <div id="tab-mine" style="display:none;">
     <?php if ($my_badges): ?>
-    <div class="card border-0 shadow-sm mb-4" style="border-radius:14px;">
-        <div class="card-body p-4">
-            <h6 class="fw-bold mb-3" style="color:#7c3aed;"><i class="bi bi-trophy-fill me-2"></i>My Badges</h6>
+    <div class="learn-card mb-4">
+        <div class="learn-card-body">
+            <h6 class="learn-card-title mb-3" style="color:#7c3aed;"><i class="bi bi-trophy-fill me-2"></i>My Badges</h6>
             <div class="d-flex flex-wrap gap-2">
                 <?php foreach ($my_badges as $b): ?>
                 <div class="learn-badge-pill">
@@ -978,9 +1063,9 @@ $badge_count   = $is_admin ? count($all_badge_awards) : count(array_filter($team
     </div>
     <?php endif; ?>
     <?php if ($my_learning_tasks): ?>
-    <div class="card border-0 shadow-sm" style="border-radius:14px;">
-        <div class="card-body p-4">
-            <h6 class="fw-bold mb-3"><i class="bi bi-journal-check me-2"></i>My Learning Tasks</h6>
+    <div class="learn-card">
+        <div class="learn-card-body">
+            <h6 class="learn-card-title mb-3"><i class="bi bi-journal-check me-2"></i>My Learning Tasks</h6>
             <div class="list-group list-group-flush">
             <?php foreach ($my_learning_tasks as $lt): ?>
             <a href="task_detail.php?id=<?= $lt['id'] ?>" class="list-group-item list-group-item-action d-flex justify-content-between align-items-center" style="border-color:var(--card-bdr);">
@@ -992,16 +1077,17 @@ $badge_count   = $is_admin ? count($all_badge_awards) : count(array_filter($team
         </div>
     </div>
     <?php else: ?>
-    <div class="text-center py-5 text-muted"><i class="bi bi-mortarboard" style="font-size:2rem;opacity:.3;display:block;margin-bottom:8px;"></i>No learning tasks assigned to you.</div>
+    <div class="learn-empty"><i class="bi bi-mortarboard"></i><p>No learning tasks assigned to you.</p></div>
     <?php endif; ?>
 
     <?php if ($log_table_ready): ?>
-    <div class="card border-0 shadow-sm mt-4" style="border-radius:14px;">
-        <div class="card-body p-4">
-            <h6 class="fw-bold mb-3"><i class="bi bi-pencil-square me-2"></i>My Learning Log</h6>
+    <div class="learn-card mt-4">
+        <div class="learn-card-body">
+            <h6 class="learn-card-title mb-3"><i class="bi bi-pencil-square me-2"></i>My Learning Log</h6>
             <?php if (!$my_logs): ?>
-            <div class="text-center py-4 text-muted">
-                Nothing logged yet — hit "Update Your Course" above.
+            <div class="learn-empty">
+                <i class="bi bi-journal-plus"></i>
+                <p>Nothing logged yet — hit "Update Your Course" above.</p>
             </div>
             <?php else: ?>
             <div class="list-group list-group-flush">
