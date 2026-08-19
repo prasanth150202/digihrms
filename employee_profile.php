@@ -36,16 +36,22 @@ if (has_role('SUPER_ADMIN','DEPT_MANAGER','TEAM_LEAD')) {
 }
 
 // Resolve this employee's user_id for workflow targeting
-$emp_user = $conn->prepare("SELECT id FROM users WHERE email=? LIMIT 1");
+$emp_user = $conn->prepare("SELECT id, role FROM users WHERE email=? LIMIT 1");
 $emp_user->execute([$emp['email']]);
-$emp_user_id = (int)($emp_user->fetchColumn() ?: 0);
+$emp_user_row  = $emp_user->fetch();
+$emp_user_id   = (int)($emp_user_row['id'] ?? 0);
+$emp_user_role = $emp_user_row['role'] ?? null;
 
 // Admin/HR reset of an employee's login password
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'admin_reset_password') {
     if (!has_role('SUPER_ADMIN','HR_ADMIN')) {
         set_flash('danger', 'You do not have permission to do that.');
+    } elseif (!verify_csrf($_POST['csrf_token'] ?? '')) {
+        set_flash('danger', 'Invalid request. Please try again.');
     } elseif (!$emp_user_id) {
         set_flash('danger', 'This employee has no login account.');
+    } elseif (!has_role('SUPER_ADMIN') && in_array($emp_user_role, ['SUPER_ADMIN', 'HR_ADMIN'], true)) {
+        set_flash('danger', 'You do not have permission to reset this account\'s password.');
     } else {
         $new     = $_POST['new_password'] ?? '';
         $confirm = $_POST['confirm_password'] ?? '';
@@ -596,6 +602,7 @@ async function runWorkflowOnPerson() {
     <div class="modal-dialog modal-dialog-centered">
         <form method="POST" class="modal-content border-0 shadow-lg" style="border-radius:18px;">
             <input type="hidden" name="action" value="admin_reset_password">
+            <input type="hidden" name="csrf_token" value="<?= sanitize(csrf_token()) ?>">
             <div class="modal-header border-0 pb-0 pt-4 px-4">
                 <div>
                     <h5 class="modal-title fw-bold mb-0">Reset Password</h5>

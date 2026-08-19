@@ -175,6 +175,17 @@ function has_role(...$roles) {
     return isset($_SESSION['user']) && in_array($_SESSION['user']['role'], $roles);
 }
 
+function csrf_token() {
+    if (empty($_SESSION['csrf_token'])) {
+        $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+    }
+    return $_SESSION['csrf_token'];
+}
+
+function verify_csrf($token) {
+    return !empty($_SESSION['csrf_token']) && is_string($token) && hash_equals($_SESSION['csrf_token'], $token);
+}
+
 function set_flash($type, $message) {
     $_SESSION['flash'] = ['type' => $type, 'message' => $message];
 }
