@@ -31,6 +31,168 @@ if ($log_table_ready) {
     } catch (PDOException $e) { $log_status_ready = false; }
 }
 
+// Check if progress %, proof-of-completion, and the history table have been migrated
+$log_progress_ready = false;
+if ($log_status_ready) {
+    try {
+        $conn->query("SELECT progress_pct, proof_url FROM hrms_learning_logs LIMIT 1");
+        $conn->query("SELECT 1 FROM hrms_learning_log_updates LIMIT 1");
+        $log_progress_ready = true;
+    } catch (PDOException $e) { $log_progress_ready = false; }
+}
+
+function _learning_log_history_note(PDO $conn, int $logId, int $pct, string $status, ?string $note): void {
+    $conn->prepare("INSERT INTO hrms_learning_log_updates (log_id, progress_pct, status, note) VALUES (?,?,?,?)")
+         ->execute([$logId, $pct, $status, $note !== '' ? $note : null]);
+}
+
+// Renders one "my learning log" list item (title, status, progress, actions, history)
+// plus its Update/Complete/Drop modals. Shared by the employee view and the
+// TL/Admin "My Learning" tab so this ~100-line block isn't duplicated twice.
+function _render_my_learning_log_item(array $log, bool $log_status_ready, bool $log_progress_ready): void {
+    $status = $log['status'] ?? 'completed';
+    ?>
+    <div class="list-group-item px-0" style="border-color:var(--card-bdr);">
+        <div class="d-flex justify-content-between align-items-start gap-2">
+            <div class="flex-grow-1">
+                <div class="fw-semibold small"><?= sanitize($log['title']) ?></div>
+                <?php if ($log_status_ready): ?>
+                <div class="small text-muted mt-1 d-flex align-items-center gap-2 flex-wrap">
+                    <?php if ($status === 'pursuing'): ?>
+                    <span class="badge" style="background:#fef9c3;color:#854d0e;">🟡 Pursuing</span>
+                    <span>Started <?= date('d M Y', strtotime($log['learned_on'])) ?></span>
+                    <?php elseif ($status === 'dropped'): ?>
+                    <span class="badge" style="background:#f1f5f9;color:#64748b;">⛔ Dropped</span>
+                    <span>Started <?= date('d M Y', strtotime($log['learned_on'])) ?></span>
+                    <?php else: ?>
+                    <span class="badge" style="background:#dcfce7;color:#166534;">✅ Completed</span>
+                    <span><?= date('d M Y', strtotime($log['learned_on'])) ?> → <?= $log['completed_on'] ? date('d M Y', strtotime($log['completed_on'])) : '—' ?></span>
+                    <?php endif; ?>
+                </div>
+                <?php if ($log_progress_ready && $status === 'pursuing'): ?>
+                <div class="progress mt-2" style="height:6px;border-radius:4px;max-width:220px;">
+                    <div class="progress-bar" style="width:<?= (int)$log['progress_pct'] ?>%;background:#7c3aed;border-radius:4px;"></div>
+                </div>
+                <div class="small text-muted mt-1"><?= (int)$log['progress_pct'] ?>% complete</div>
+                <?php endif; ?>
+                <?php if ($log_progress_ready && $status === 'completed' && !empty($log['proof_url'])): ?>
+                <div class="small mt-1"><a href="<?= sanitize($log['proof_url']) ?>" target="_blank" rel="noopener noreferrer">🔗 Proof of completion</a></div>
+                <?php endif; ?>
+                <?php else: ?>
+                <div class="small text-muted mt-1"><?= date('d M Y', strtotime($log['learned_on'])) ?></div>
+                <?php endif; ?>
+            </div>
+            <?php if ($status === 'pursuing'): ?>
+                <?php if ($log_progress_ready): ?>
+                <div class="d-flex flex-column gap-1">
+                    <button type="button" class="btn btn-sm btn-outline-primary" style="font-size:11px;border-radius:6px;white-space:nowrap;" data-bs-toggle="modal" data-bs-target="#lm-progress-<?= (int)$log['id'] ?>">Update %</button>
+                    <button type="button" class="btn btn-sm btn-outline-success" style="font-size:11px;border-radius:6px;white-space:nowrap;" data-bs-toggle="modal" data-bs-target="#lm-complete-<?= (int)$log['id'] ?>">Mark Completed</button>
+                    <button type="button" class="btn btn-sm btn-outline-danger" style="font-size:11px;border-radius:6px;white-space:nowrap;" data-bs-toggle="modal" data-bs-target="#lm-drop-<?= (int)$log['id'] ?>">Drop</button>
+                </div>
+                <?php elseif ($log_status_ready): ?>
+                <form method="POST" class="m-0">
+                    <input type="hidden" name="action" value="mark_learning_log_completed">
+                    <input type="hidden" name="id" value="<?= (int)$log['id'] ?>">
+                    <input type="hidden" name="csrf_token" value="<?= sanitize(csrf_token()) ?>">
+                    <button type="submit" class="btn btn-sm btn-outline-success" style="font-size:11px;border-radius:6px;white-space:nowrap;">Mark Completed</button>
+                </form>
+                <?php endif; ?>
+            <?php endif; ?>
+        </div>
+        <?php if ($log['notes']): ?>
+        <div class="small text-muted mt-1"><?= nl2br(sanitize($log['notes'])) ?></div>
+        <?php endif; ?>
+        <?php if ($log_progress_ready && !empty($log['history'])): ?>
+        <details class="mt-2">
+            <summary class="small text-muted" style="cursor:pointer;">History (<?= count($log['history']) ?>)</summary>
+            <div class="mt-1">
+            <?php foreach (array_reverse($log['history']) as $h): ?>
+                <div class="small text-muted" style="padding:2px 0;">
+                    <?= date('d M Y, h:i A', strtotime($h['created_at'])) ?> —
+                    <?php if ($h['status'] === 'completed'): ?>Completed (100%)
+                    <?php elseif ($h['status'] === 'dropped'): ?>Dropped at <?= (int)$h['progress_pct'] ?>%
+                    <?php else: ?><?= (int)$h['progress_pct'] ?>%
+                    <?php endif; ?>
+                    <?php if ($h['note']): ?> — <?= sanitize($h['note']) ?><?php endif; ?>
+                </div>
+            <?php endforeach; ?>
+            </div>
+        </details>
+        <?php endif; ?>
+    </div>
+
+    <?php if ($log_progress_ready && $status === 'pursuing'): ?>
+    <div class="modal fade" id="lm-progress-<?= (int)$log['id'] ?>" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <form method="POST" class="modal-content border-0 shadow-lg" style="border-radius:18px;">
+            <input type="hidden" name="action" value="update_learning_log_progress">
+            <input type="hidden" name="id" value="<?= (int)$log['id'] ?>">
+            <input type="hidden" name="csrf_token" value="<?= sanitize(csrf_token()) ?>">
+            <div class="modal-header border-0 pb-0 pt-4 px-4">
+                <h5 class="modal-title fw-bold mb-0">Update Progress</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body px-4 pt-3 pb-2">
+                <label class="form-label small fw-semibold">Progress %</label>
+                <input type="number" name="progress_pct" class="form-control" min="0" max="100" value="<?= (int)$log['progress_pct'] ?>" required>
+                <label class="form-label small fw-semibold mt-3">Note (optional)</label>
+                <textarea name="note" class="form-control" rows="2" placeholder="What did you cover?"></textarea>
+            </div>
+            <div class="modal-footer border-0 px-4 pb-4 pt-2">
+                <button type="button" class="btn btn-light btn-sm" data-bs-dismiss="modal">Cancel</button>
+                <button type="submit" class="btn btn-primary btn-sm">Save</button>
+            </div>
+        </form>
+      </div>
+    </div>
+
+    <div class="modal fade" id="lm-complete-<?= (int)$log['id'] ?>" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <form method="POST" class="modal-content border-0 shadow-lg" style="border-radius:18px;">
+            <input type="hidden" name="action" value="mark_learning_log_completed">
+            <input type="hidden" name="id" value="<?= (int)$log['id'] ?>">
+            <input type="hidden" name="csrf_token" value="<?= sanitize(csrf_token()) ?>">
+            <div class="modal-header border-0 pb-0 pt-4 px-4">
+                <h5 class="modal-title fw-bold mb-0">Mark Completed</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body px-4 pt-3 pb-2">
+                <label class="form-label small fw-semibold">Proof of completion (optional)</label>
+                <input type="url" name="proof_url" class="form-control" placeholder="Paste a certificate/completion URL">
+            </div>
+            <div class="modal-footer border-0 px-4 pb-4 pt-2">
+                <button type="button" class="btn btn-light btn-sm" data-bs-dismiss="modal">Cancel</button>
+                <button type="submit" class="btn btn-success btn-sm">Mark Completed</button>
+            </div>
+        </form>
+      </div>
+    </div>
+
+    <div class="modal fade" id="lm-drop-<?= (int)$log['id'] ?>" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <form method="POST" class="modal-content border-0 shadow-lg" style="border-radius:18px;">
+            <input type="hidden" name="action" value="drop_learning_log">
+            <input type="hidden" name="id" value="<?= (int)$log['id'] ?>">
+            <input type="hidden" name="csrf_token" value="<?= sanitize(csrf_token()) ?>">
+            <div class="modal-header border-0 pb-0 pt-4 px-4">
+                <h5 class="modal-title fw-bold mb-0">Drop this course?</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body px-4 pt-3 pb-2">
+                <label class="form-label small fw-semibold">Reason (optional)</label>
+                <textarea name="note" class="form-control" rows="2"></textarea>
+            </div>
+            <div class="modal-footer border-0 px-4 pb-4 pt-2">
+                <button type="button" class="btn btn-light btn-sm" data-bs-dismiss="modal">Cancel</button>
+                <button type="submit" class="btn btn-danger btn-sm">Drop</button>
+            </div>
+        </form>
+      </div>
+    </div>
+    <?php endif; ?>
+    <?php
+}
+
 // ── Add a self-logged learning entry ────────────────────────────────────────
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'add_learning_log') {
     if (!$my_emp_id) {
@@ -45,8 +207,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'add_l
         $learnedOn   = $_POST['learned_on'] ?? date('Y-m-d');
         $status      = ($log_status_ready && ($_POST['status'] ?? 'pursuing') === 'completed') ? 'completed' : 'pursuing';
         $completedOn = $status === 'completed' ? ($_POST['completed_on'] ?: date('Y-m-d')) : null;
+        $proofUrl    = ($log_progress_ready && $status === 'completed') ? trim($_POST['proof_url'] ?? '') : '';
+        $progressPct = ($log_progress_ready && $status === 'completed') ? 100 : 0;
         if ($title === '') {
             set_flash('danger', 'Please enter a course/topic.');
+        } elseif ($log_progress_ready) {
+            $conn->prepare("INSERT INTO hrms_learning_logs (employee_id, title, notes, learned_on, status, completed_on, progress_pct, proof_url) VALUES (?,?,?,?,?,?,?,?)")
+                 ->execute([$my_emp_id, $title, $notes !== '' ? $notes : null, $learnedOn, $status, $completedOn, $progressPct, $proofUrl !== '' ? $proofUrl : null]);
+            $logId = (int)$conn->lastInsertId();
+            _learning_log_history_note($conn, $logId, $progressPct, $status, 'Course added');
+            pts_award($conn, $my_emp_id, 'hrms_learning_self_logged', (string)$logId, 'learning_log', "Logged: $title");
+            set_flash('success', $status === 'completed' ? 'Nice — course logged as completed.' : 'Course added — good luck!');
         } elseif ($log_status_ready) {
             $conn->prepare("INSERT INTO hrms_learning_logs (employee_id, title, notes, learned_on, status, completed_on) VALUES (?,?,?,?,?,?)")
                  ->execute([$my_emp_id, $title, $notes !== '' ? $notes : null, $learnedOn, $status, $completedOn]);
@@ -73,9 +244,66 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'mark_
     } elseif (!verify_csrf($_POST['csrf_token'] ?? '')) {
         set_flash('danger', 'Invalid request. Please try again.');
     } elseif ($logId && $my_emp_id) {
-        $conn->prepare("UPDATE hrms_learning_logs SET status='completed', completed_on=? WHERE id=? AND employee_id=? AND status='pursuing'")
-             ->execute([date('Y-m-d'), $logId, $my_emp_id]);
+        if ($log_progress_ready) {
+            $proofUrl = trim($_POST['proof_url'] ?? '');
+            $stmt = $conn->prepare("UPDATE hrms_learning_logs SET status='completed', completed_on=?, progress_pct=100, proof_url=? WHERE id=? AND employee_id=? AND status='pursuing'");
+            $stmt->execute([date('Y-m-d'), $proofUrl !== '' ? $proofUrl : null, $logId, $my_emp_id]);
+            if ($stmt->rowCount() > 0) {
+                _learning_log_history_note($conn, $logId, 100, 'completed', $proofUrl !== '' ? "Proof: $proofUrl" : null);
+            }
+        } else {
+            $conn->prepare("UPDATE hrms_learning_logs SET status='completed', completed_on=? WHERE id=? AND employee_id=? AND status='pursuing'")
+                 ->execute([date('Y-m-d'), $logId, $my_emp_id]);
+        }
         set_flash('success', 'Marked as completed. 🎉');
+    }
+    header('Location: learning.php');
+    exit;
+}
+
+// ── Update progress % on a Pursuing entry ───────────────────────────────────
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'update_learning_log_progress') {
+    $logId = (int)($_POST['id'] ?? 0);
+    $pct   = (int)($_POST['progress_pct'] ?? -1);
+    $note  = trim($_POST['note'] ?? '');
+    if (!$log_progress_ready) {
+        set_flash('danger', 'Progress tracking is not set up yet. Ask your Super Admin to run the migration.');
+    } elseif (!verify_csrf($_POST['csrf_token'] ?? '')) {
+        set_flash('danger', 'Invalid request. Please try again.');
+    } elseif ($pct < 0 || $pct > 100) {
+        set_flash('danger', 'Progress must be between 0 and 100.');
+    } elseif ($logId && $my_emp_id) {
+        $stmt = $conn->prepare("UPDATE hrms_learning_logs SET progress_pct=? WHERE id=? AND employee_id=? AND status='pursuing'");
+        $stmt->execute([$pct, $logId, $my_emp_id]);
+        if ($stmt->rowCount() > 0) {
+            _learning_log_history_note($conn, $logId, $pct, 'pursuing', $note);
+            set_flash('success', "Progress updated to {$pct}%.");
+        } else {
+            set_flash('danger', 'Could not update — that course may already be completed or dropped.');
+        }
+    }
+    header('Location: learning.php');
+    exit;
+}
+
+// ── Drop a Pursuing entry ────────────────────────────────────────────────────
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'drop_learning_log') {
+    $logId = (int)($_POST['id'] ?? 0);
+    $note  = trim($_POST['note'] ?? '');
+    if (!$log_progress_ready) {
+        set_flash('danger', 'Progress tracking is not set up yet. Ask your Super Admin to run the migration.');
+    } elseif (!verify_csrf($_POST['csrf_token'] ?? '')) {
+        set_flash('danger', 'Invalid request. Please try again.');
+    } elseif ($logId && $my_emp_id) {
+        $stmt = $conn->prepare("UPDATE hrms_learning_logs SET status='dropped' WHERE id=? AND employee_id=? AND status='pursuing'");
+        $stmt->execute([$logId, $my_emp_id]);
+        if ($stmt->rowCount() > 0) {
+            $pctQ = $conn->prepare("SELECT progress_pct FROM hrms_learning_logs WHERE id=?");
+            $pctQ->execute([$logId]);
+            $currentPct = (int)$pctQ->fetchColumn();
+            _learning_log_history_note($conn, $logId, $currentPct, 'dropped', $note);
+            set_flash('success', 'Course marked as dropped.');
+        }
     }
     header('Location: learning.php');
     exit;
@@ -130,6 +358,15 @@ if ($log_table_ready && $my_emp_id) {
         $ml = $conn->prepare("SELECT * FROM hrms_learning_logs WHERE employee_id=? ORDER BY learned_on DESC, created_at DESC LIMIT 50");
         $ml->execute([$my_emp_id]);
         $my_logs = $ml->fetchAll();
+
+        if ($log_progress_ready && $my_logs) {
+            $ids = implode(',', array_map('intval', array_column($my_logs, 'id')));
+            $hist = $conn->query("SELECT * FROM hrms_learning_log_updates WHERE log_id IN ({$ids}) ORDER BY created_at ASC")->fetchAll();
+            $histByLog = [];
+            foreach ($hist as $h) { $histByLog[$h['log_id']][] = $h; }
+            foreach ($my_logs as &$log) { $log['history'] = $histByLog[$log['id']] ?? []; }
+            unset($log);
+        }
     } catch (PDOException $e) {}
 }
 
@@ -137,6 +374,7 @@ if ($log_table_ready && $my_emp_id) {
 $team_learning = [];
 $team_pending_reviews = [];
 $team_logs = [];
+$tl_dept_missing = false;
 if ($is_tl || $is_admin) {
     // Find team members (users in same dept whose TL is $uid, or all for admin)
     if ($is_admin) {
@@ -161,6 +399,7 @@ if ($is_tl || $is_admin) {
             $teamUserIds = $teamUsers->fetchAll(PDO::FETCH_COLUMN);
         } else {
             $teamUserIds = [];
+            $tl_dept_missing = true;
         }
     }
 
@@ -328,7 +567,7 @@ include 'header.php';
                 <?php if ($log_status_ready): ?>
                 <div class="mb-3">
                     <label class="form-label small fw-semibold">Status</label>
-                    <select name="status" id="lg-status" class="form-select" onchange="document.getElementById('lg-completed-wrap').style.display=this.value==='completed'?'':'none'">
+                    <select name="status" id="lg-status" class="form-select" onchange="document.querySelectorAll('.lg-completed-only').forEach(function(el){ el.style.display = document.getElementById('lg-status').value==='completed' ? '' : 'none'; })">
                         <option value="pursuing">Pursuing</option>
                         <option value="completed">Completed</option>
                     </select>
@@ -344,12 +583,18 @@ include 'header.php';
                         <input type="date" name="learned_on" class="form-control" value="<?= date('Y-m-d') ?>" max="<?= date('Y-m-d') ?>" required>
                     </div>
                     <?php if ($log_status_ready): ?>
-                    <div class="col-6" id="lg-completed-wrap" style="display:none;">
+                    <div class="col-6 lg-completed-only" id="lg-completed-wrap" style="display:none;">
                         <label class="form-label small fw-semibold">Completed On</label>
                         <input type="date" name="completed_on" class="form-control" value="<?= date('Y-m-d') ?>" max="<?= date('Y-m-d') ?>">
                     </div>
                     <?php endif; ?>
                 </div>
+                <?php if ($log_progress_ready): ?>
+                <div class="mb-2 lg-completed-only" style="display:none;">
+                    <label class="form-label small fw-semibold">Proof of completion (optional)</label>
+                    <input type="url" name="proof_url" class="form-control" placeholder="Paste a certificate/completion URL">
+                </div>
+                <?php endif; ?>
             </div>
             <div class="modal-footer border-0 px-4 pb-4 pt-2">
                 <button type="button" class="btn btn-light btn-sm" data-bs-dismiss="modal">Cancel</button>
@@ -484,39 +729,7 @@ include 'header.php';
         </div>
         <?php else: ?>
         <div class="list-group list-group-flush">
-        <?php foreach ($my_logs as $log): ?>
-            <div class="list-group-item px-0" style="border-color:var(--card-bdr);">
-                <div class="d-flex justify-content-between align-items-start gap-2">
-                    <div>
-                        <div class="fw-semibold small"><?= sanitize($log['title']) ?></div>
-                        <?php if ($log_status_ready): ?>
-                        <div class="small text-muted mt-1 d-flex align-items-center gap-2 flex-wrap">
-                            <?php if (($log['status'] ?? 'completed') === 'pursuing'): ?>
-                            <span class="badge" style="background:#fef9c3;color:#854d0e;">🟡 Pursuing</span>
-                            <span>Started <?= date('d M Y', strtotime($log['learned_on'])) ?></span>
-                            <?php else: ?>
-                            <span class="badge" style="background:#dcfce7;color:#166534;">✅ Completed</span>
-                            <span><?= date('d M Y', strtotime($log['learned_on'])) ?> → <?= $log['completed_on'] ? date('d M Y', strtotime($log['completed_on'])) : '—' ?></span>
-                            <?php endif; ?>
-                        </div>
-                        <?php else: ?>
-                        <div class="small text-muted mt-1"><?= date('d M Y', strtotime($log['learned_on'])) ?></div>
-                        <?php endif; ?>
-                    </div>
-                    <?php if ($log_status_ready && ($log['status'] ?? 'completed') === 'pursuing'): ?>
-                    <form method="POST" class="m-0">
-                        <input type="hidden" name="action" value="mark_learning_log_completed">
-                        <input type="hidden" name="id" value="<?= (int)$log['id'] ?>">
-                        <input type="hidden" name="csrf_token" value="<?= sanitize(csrf_token()) ?>">
-                        <button type="submit" class="btn btn-sm btn-outline-success" style="font-size:11px;border-radius:6px;white-space:nowrap;">Mark Completed</button>
-                    </form>
-                    <?php endif; ?>
-                </div>
-                <?php if ($log['notes']): ?>
-                <div class="small text-muted mt-1"><?= nl2br(sanitize($log['notes'])) ?></div>
-                <?php endif; ?>
-            </div>
-        <?php endforeach; ?>
+        <?php foreach ($my_logs as $log): _render_my_learning_log_item($log, $log_status_ready, $log_progress_ready); endforeach; ?>
         </div>
         <?php endif; ?>
     </div>
@@ -545,6 +758,16 @@ include 'header.php';
 
 <!-- ── TAB: Team/All Learners ─────────────────────────────────────────── -->
 <div id="tab-team">
+<?php if ($tl_dept_missing): ?>
+<div class="alert alert-warning d-flex align-items-center gap-3 mb-4" style="border-radius:12px;">
+    <i class="bi bi-exclamation-triangle-fill fs-4"></i>
+    <div>
+        <strong>You're not linked to a team yet.</strong>
+        You have the Team Lead role, but your Employee record isn't marked as Team Lead for any department, so the system doesn't know whose team is yours.
+        Go to <a href="employees.php">Employees</a> → open your own record → check "Is Team Lead" and pick your department.
+    </div>
+</div>
+<?php endif; ?>
 <?php
 $done_count    = count(array_filter($team_learning, fn($t) => $t['status']==='DONE'));
 $pending_count = count(array_filter($team_learning, fn($t) => $t['status']!=='DONE'));
@@ -626,12 +849,19 @@ $badge_count   = $is_admin ? count($all_badge_awards) : count(array_filter($team
                 <div class="small"><span class="fw-semibold"><?= sanitize($log['emp_name']) ?></span> — <?= sanitize($log['title']) ?></div>
                 <?php if ($log_status_ready): ?>
                 <div class="small text-muted mt-1 d-flex align-items-center gap-2 flex-wrap">
-                    <?php if (($log['status'] ?? 'completed') === 'pursuing'): ?>
+                    <?php $tstatus = $log['status'] ?? 'completed'; ?>
+                    <?php if ($tstatus === 'pursuing'): ?>
                     <span class="badge" style="background:#fef9c3;color:#854d0e;">🟡 Pursuing</span>
+                    <span>Started <?= date('d M Y', strtotime($log['learned_on'])) ?><?= isset($log['progress_pct']) ? ' — ' . (int)$log['progress_pct'] . '%' : '' ?></span>
+                    <?php elseif ($tstatus === 'dropped'): ?>
+                    <span class="badge" style="background:#f1f5f9;color:#64748b;">⛔ Dropped</span>
                     <span>Started <?= date('d M Y', strtotime($log['learned_on'])) ?></span>
                     <?php else: ?>
                     <span class="badge" style="background:#dcfce7;color:#166534;">✅ Completed</span>
                     <span><?= date('d M Y', strtotime($log['learned_on'])) ?> → <?= $log['completed_on'] ? date('d M Y', strtotime($log['completed_on'])) : '—' ?></span>
+                    <?php if (!empty($log['proof_url'])): ?>
+                    <a href="<?= sanitize($log['proof_url']) ?>" target="_blank" rel="noopener noreferrer">🔗 Proof</a>
+                    <?php endif; ?>
                     <?php endif; ?>
                 </div>
                 <?php else: ?>
@@ -775,39 +1005,7 @@ $badge_count   = $is_admin ? count($all_badge_awards) : count(array_filter($team
             </div>
             <?php else: ?>
             <div class="list-group list-group-flush">
-            <?php foreach ($my_logs as $log): ?>
-                <div class="list-group-item px-0" style="border-color:var(--card-bdr);">
-                    <div class="d-flex justify-content-between align-items-start gap-2">
-                        <div>
-                            <div class="fw-semibold small"><?= sanitize($log['title']) ?></div>
-                            <?php if ($log_status_ready): ?>
-                            <div class="small text-muted mt-1 d-flex align-items-center gap-2 flex-wrap">
-                                <?php if (($log['status'] ?? 'completed') === 'pursuing'): ?>
-                                <span class="badge" style="background:#fef9c3;color:#854d0e;">🟡 Pursuing</span>
-                                <span>Started <?= date('d M Y', strtotime($log['learned_on'])) ?></span>
-                                <?php else: ?>
-                                <span class="badge" style="background:#dcfce7;color:#166534;">✅ Completed</span>
-                                <span><?= date('d M Y', strtotime($log['learned_on'])) ?> → <?= $log['completed_on'] ? date('d M Y', strtotime($log['completed_on'])) : '—' ?></span>
-                                <?php endif; ?>
-                            </div>
-                            <?php else: ?>
-                            <div class="small text-muted mt-1"><?= date('d M Y', strtotime($log['learned_on'])) ?></div>
-                            <?php endif; ?>
-                        </div>
-                        <?php if ($log_status_ready && ($log['status'] ?? 'completed') === 'pursuing'): ?>
-                        <form method="POST" class="m-0">
-                            <input type="hidden" name="action" value="mark_learning_log_completed">
-                            <input type="hidden" name="id" value="<?= (int)$log['id'] ?>">
-                            <input type="hidden" name="csrf_token" value="<?= sanitize(csrf_token()) ?>">
-                            <button type="submit" class="btn btn-sm btn-outline-success" style="font-size:11px;border-radius:6px;white-space:nowrap;">Mark Completed</button>
-                        </form>
-                        <?php endif; ?>
-                    </div>
-                    <?php if ($log['notes']): ?>
-                    <div class="small text-muted mt-1"><?= nl2br(sanitize($log['notes'])) ?></div>
-                    <?php endif; ?>
-                </div>
-            <?php endforeach; ?>
+            <?php foreach ($my_logs as $log): _render_my_learning_log_item($log, $log_status_ready, $log_progress_ready); endforeach; ?>
             </div>
             <?php endif; ?>
         </div>
