@@ -124,8 +124,8 @@ if ($is_ajax && empty($_POST['action']) && !empty($_GET['action'])) {
 // Create task (TL/Admin only)
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 
-    // Employee creates a task for themselves
-    if ($_POST['action'] === 'create_own_task' && !$is_tl && !$hr_view) {
+    // Employee (or HR) creates a task for themselves
+    if ($_POST['action'] === 'create_own_task' && !$is_tl) {
         $needs_appr = isset($_POST['needs_approval']) ? 1 : 0;
         // Find this employee's TL (same dept, is_team_lead=1) to set as assigned_by when approval is needed
         $assigned_by = $uid;
@@ -1369,7 +1369,7 @@ $status_color   = ['TODO'=>'secondary','IN_PROGRESS'=>'primary','REVIEW'=>'warni
             <i class="bi bi-plus-lg me-1"></i> Create Task
         </button>
         <?php endif; ?>
-        <?php if (!$is_tl && !$hr_view): ?>
+        <?php if (!$is_tl): ?>
         <button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#ownTaskModal" style="border-radius:8px;">
             <i class="bi bi-plus-lg me-1"></i> New Task
         </button>
@@ -3469,8 +3469,8 @@ $cal_tasks_json = json_encode(array_values(array_map(function($t) {
 </div>
 <?php endif; ?>
 
-<!-- Create Own Task Modal (Employee) -->
-<?php if (!$is_tl && !$hr_view): ?>
+<!-- Create Own Task Modal (Employee / HR) -->
+<?php if (!$is_tl): ?>
 <div class="modal fade" id="ownTaskModal" tabindex="-1">
     <div class="modal-dialog modal-lg modal-dialog-centered">
         <div class="modal-content" id="ownTaskForm" style="border-radius:16px;border:none;box-shadow:0 20px 60px rgba(0,0,0,.15);">
@@ -3518,6 +3518,7 @@ $cal_tasks_json = json_encode(array_values(array_map(function($t) {
                         <label class="form-label fw-semibold" style="font-size:.82rem;">Est. Hours</label>
                         <input type="number" name="estimated_hours" class="form-control" step="0.5" min="0.5" placeholder="e.g. 4" style="border-radius:8px;">
                     </div>
+                    <?php if (!$hr_view): ?>
                     <div class="col-12">
                         <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:10px 14px;border:1.5px solid #e2e8f0;border-radius:8px;background:#f8fafc;transition:border-color .15s;" id="ownApprovalLabel">
                             <input type="checkbox" name="needs_approval" value="1" id="ownNeedsApproval" style="width:18px;height:18px;flex-shrink:0;cursor:pointer;" onchange="document.getElementById('ownApprovalLabel').style.borderColor=this.checked?'#7c3aed':'#e2e8f0';">
@@ -3527,6 +3528,7 @@ $cal_tasks_json = json_encode(array_values(array_map(function($t) {
                             </div>
                         </label>
                     </div>
+                    <?php endif; ?>
                 </div>
             </div>
             <div class="modal-footer border-0 px-4 pb-4 pt-2 gap-2">
