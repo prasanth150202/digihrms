@@ -310,6 +310,8 @@ $in_can_connect = $in && !empty($in['client_id']);
 // ── Active jobs for posting ───────────────────────────────
 $active_jobs = $conn->query("SELECT jp.id, jp.title, jp.location, jp.experience_min, jp.experience_max,
     (SELECT COUNT(*) FROM job_portal_posts jpp WHERE jpp.job_id=jp.id AND jpp.portal='LINKEDIN' AND jpp.status='POSTED') as li_posted,
+    (SELECT posted_url FROM job_portal_posts jpp WHERE jpp.job_id=jp.id AND jpp.portal='LINKEDIN' AND jpp.status='POSTED' LIMIT 1) as li_posted_url,
+    (SELECT posted_at  FROM job_portal_posts jpp WHERE jpp.job_id=jp.id AND jpp.portal='LINKEDIN' AND jpp.status='POSTED' LIMIT 1) as li_posted_at,
     (SELECT COUNT(*) FROM job_portal_posts jpp WHERE jpp.job_id=jp.id AND jpp.portal='NAUKRI'   AND jpp.status='POSTED') as nk_posted,
     (SELECT COUNT(*) FROM job_portal_posts jpp WHERE jpp.job_id=jp.id AND jpp.portal='INDEED'   AND jpp.status='POSTED') as in_posted
     FROM job_postings jp WHERE jp.status='ACTIVE' ORDER BY jp.created_at DESC")->fetchAll();
@@ -500,7 +502,14 @@ include 'header.php';
                         </td>
                         <td>
                             <?php if ($j['li_posted']): ?>
+                            <?php if ($j['li_posted_url']): ?>
+                            <a href="<?= sanitize($j['li_posted_url']) ?>" target="_blank" class="badge bg-success-subtle text-success text-decoration-none" style="font-size:.65rem;">
+                                <i class="bi bi-check me-1"></i>Posted<?= $j['li_posted_at'] ? ' · ' . date('d M', strtotime($j['li_posted_at'])) : '' ?>
+                                <i class="bi bi-box-arrow-up-right ms-1"></i>
+                            </a>
+                            <?php else: ?>
                             <span class="badge bg-success-subtle text-success" style="font-size:.65rem;"><i class="bi bi-check me-1"></i>Posted</span>
+                            <?php endif; ?>
                             <?php else: ?>
                             <span class="badge bg-secondary-subtle text-secondary" style="font-size:.65rem;">Not posted</span>
                             <?php endif; ?>
