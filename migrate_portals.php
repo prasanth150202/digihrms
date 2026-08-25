@@ -23,6 +23,39 @@ function run_sql($conn, $label, $sql) {
     }
 }
 
+// Adds a column only if it isn't already there — CREATE TABLE IF NOT EXISTS
+// is a no-op against a pre-existing table, so a table created earlier with
+// an incomplete/different schema never gets patched up by it.
+function ensure_column($conn, $table, $column, $definition) {
+    global $steps, $errors;
+    try {
+        $exists = $conn->query("SHOW COLUMNS FROM `$table` LIKE " . $conn->quote($column))->fetch();
+        if ($exists) {
+            $steps[] = "⏭️ $table.$column (already exists)";
+            return;
+        }
+        $conn->exec("ALTER TABLE `$table` ADD COLUMN $column $definition");
+        $steps[] = "✅ Added $table.$column";
+    } catch (PDOException $e) {
+        $errors[] = "❌ $table.$column: " . $e->getMessage();
+    }
+}
+
+function ensure_unique_key($conn, $table, $keyName, $columnsSql) {
+    global $steps, $errors;
+    try {
+        $exists = $conn->query("SHOW KEYS FROM `$table` WHERE Key_name = " . $conn->quote($keyName))->fetch();
+        if ($exists) {
+            $steps[] = "⏭️ $table key $keyName (already exists)";
+            return;
+        }
+        $conn->exec("ALTER TABLE `$table` ADD UNIQUE KEY `$keyName` ($columnsSql)");
+        $steps[] = "✅ Added $table unique key $keyName";
+    } catch (PDOException $e) {
+        $errors[] = "❌ $table key $keyName: " . $e->getMessage();
+    }
+}
+
 // ── 1. Portal credentials / tokens (LinkedIn, Naukri, Indeed) ───────────────
 run_sql($conn, 'Create portal_configs', "
 CREATE TABLE IF NOT EXISTS portal_configs (
@@ -38,6 +71,15 @@ CREATE TABLE IF NOT EXISTS portal_configs (
     UNIQUE KEY uq_portal (portal)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 ");
+// In case portal_configs already existed with a different/older shape, patch it up column by column.
+ensure_column($conn, 'portal_configs', 'client_id',     "VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL");
+ensure_column($conn, 'portal_configs', 'client_secret', "VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL");
+ensure_column($conn, 'portal_configs', 'access_token',  "TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL");
+ensure_column($conn, 'portal_configs', 'token_expiry',  "DATETIME NULL");
+ensure_column($conn, 'portal_configs', 'extra',         "TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL COMMENT 'JSON: person_id/employer_id etc.'");
+ensure_column($conn, 'portal_configs', 'created_at',    "TIMESTAMP DEFAULT CURRENT_TIMESTAMP");
+ensure_column($conn, 'portal_configs', 'updated_at',    "DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP");
+ensure_unique_key($conn, 'portal_configs', 'uq_portal', '`portal`');
 
 // ── 2. Record of jobs posted to each portal ──────────────────────────────────
 run_sql($conn, 'Create job_portal_posts', "
@@ -54,6 +96,13 @@ CREATE TABLE IF NOT EXISTS job_portal_posts (
     INDEX idx_job (job_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 ");
+// Same defensive patch-up in case this pre-existed too.
+ensure_column($conn, 'job_portal_posts', 'external_id', "VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL");
+ensure_column($conn, 'job_portal_posts', 'posted_url',  "VARCHAR(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL");
+ensure_column($conn, 'job_portal_posts', 'status',      "VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'POSTED'");
+ensure_column($conn, 'job_portal_posts', 'posted_at',   "DATETIME NULL");
+ensure_column($conn, 'job_portal_posts', 'created_at',  "TIMESTAMP DEFAULT CURRENT_TIMESTAMP");
+ensure_unique_key($conn, 'job_portal_posts', 'uq_job_portal', '`job_id`, `portal`');
 
 ?>
 <!DOCTYPE html>
