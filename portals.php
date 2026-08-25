@@ -300,32 +300,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-// ── Build OAuth URLs ──────────────────────────────────────
-$li_auth_url = null;
-if ($li && !empty($li['client_id'])) {
-    $state = bin2hex(random_bytes(8));
-    $_SESSION['li_oauth_state'] = $state;
-    $li_auth_url = 'https://www.linkedin.com/oauth/v2/authorization?' . http_build_query([
-        'response_type' => 'code',
-        'client_id'     => $li['client_id'],
-        'redirect_uri'  => $li_redirect,
-        'state'         => $state,
-        'scope'         => 'w_member_social',
-    ]);
-}
-
-$in_auth_url = null;
-if ($in && !empty($in['client_id'])) {
-    $state = bin2hex(random_bytes(8));
-    $_SESSION['indeed_oauth_state'] = $state;
-    $in_auth_url = 'https://secure.indeed.com/oauth/v2/authorize?' . http_build_query([
-        'response_type' => 'code',
-        'client_id'     => $in['client_id'],
-        'redirect_uri'  => $in_redirect,
-        'state'         => $state,
-        'scope'         => 'employer_access',
-    ]);
-}
+// ── OAuth connect availability (state is generated at click-time by
+// linkedin_connect.php / indeed_connect.php, not baked into this page —
+// otherwise a stale reload/tab/cache overwrites the session state before
+// the user actually clicks, causing "Invalid OAuth state") ──────────────
+$li_can_connect = $li && !empty($li['client_id']);
+$in_can_connect = $in && !empty($in['client_id']);
 
 // ── Active jobs for posting ───────────────────────────────
 $active_jobs = $conn->query("SELECT jp.id, jp.title, jp.location, jp.experience_min, jp.experience_max,
@@ -463,9 +443,9 @@ include 'header.php';
                     <i class="bi bi-x-circle me-1"></i>Disconnect LinkedIn Account
                 </button>
             </form>
-            <?php elseif ($li_auth_url): ?>
+            <?php elseif ($li_can_connect): ?>
             <p class="text-muted small mb-3">Authorise this app to post on your behalf via OAuth 2.0.</p>
-            <a href="<?= sanitize($li_auth_url) ?>" class="btn w-100" style="background:#0077b5;color:#fff;">
+            <a href="linkedin_connect.php" class="btn w-100" style="background:#0077b5;color:#fff;">
                 <i class="bi bi-linkedin me-2"></i>Connect LinkedIn Account
             </a>
             <?php else: ?>
@@ -786,9 +766,9 @@ include 'header.php';
                     <i class="bi bi-x-circle me-1"></i>Disconnect Indeed Account
                 </button>
             </form>
-            <?php elseif ($in_auth_url): ?>
+            <?php elseif ($in_can_connect): ?>
             <p class="text-muted small mb-3">Connect your Indeed Employer account via OAuth 2.0.</p>
-            <a href="<?= sanitize($in_auth_url) ?>" class="btn w-100" style="background:#003a9b;color:#fff;">
+            <a href="indeed_connect.php" class="btn w-100" style="background:#003a9b;color:#fff;">
                 <i class="bi bi-briefcase-fill me-2"></i>Connect Indeed Account
             </a>
             <?php else: ?>
