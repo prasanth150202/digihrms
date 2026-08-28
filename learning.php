@@ -343,9 +343,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'delet
                     SELECT 1 FROM employee_roles er
                     JOIN employees e ON e.id=er.employee_id
                     JOIN users u ON u.email=e.email
-                    WHERE u.id=? AND er.dept_id=? AND er.is_team_lead=0
+                    WHERE u.id=? AND (er.dept_id=? OR e.dept_id=?) AND er.is_team_lead=0
                 ");
-                $chk->execute([$ownerUserId, $deptId]);
+                $chk->execute([$ownerUserId, $deptId, $deptId]);
                 $allowed = (bool)$chk->fetchColumn();
             }
         }
@@ -448,9 +448,9 @@ if ($is_tl || $is_admin) {
                 SELECT u.id FROM users u
                 JOIN employees e ON e.email=u.email
                 JOIN employee_roles er ON er.employee_id=e.id
-                WHERE er.dept_id=? AND er.is_team_lead=0
+                WHERE (er.dept_id=? OR e.dept_id=?) AND er.is_team_lead=0
             ");
-            $teamUsers->execute([$deptId]);
+            $teamUsers->execute([$deptId, $deptId]);
             $teamUserIds = $teamUsers->fetchAll(PDO::FETCH_COLUMN);
         } else {
             $teamUserIds = [];
