@@ -307,6 +307,63 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'drop_
     exit;
 }
 
+// ── TL/Admin: delete a team member's learning log entry ────────────────────
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'delete_team_learning_log') {
+    $logId = (int)($_POST['id'] ?? 0);
+    if (!$log_table_ready) {
+        set_flash('danger', 'Learning log is not set up yet.');
+    } elseif (!verify_csrf($_POST['csrf_token'] ?? '')) {
+        set_flash('danger', 'Invalid request. Please try again.');
+    } elseif (!($is_tl || $is_admin)) {
+        set_flash('danger', 'You are not allowed to do that.');
+    } elseif ($logId) {
+        $ownerQ = $conn->prepare("
+            SELECT u.id FROM hrms_learning_logs hl
+            JOIN employees e ON e.id = hl.employee_id
+            JOIN users u ON u.email = e.email
+            WHERE hl.id = ?
+        ");
+        $ownerQ->execute([$logId]);
+        $ownerUserId = $ownerQ->fetchColumn();
+
+        $allowed = false;
+        if ($ownerUserId && $is_admin) {
+            $allowed = true;
+        } elseif ($ownerUserId) {
+            $tlDept = $conn->prepare("
+                SELECT er.dept_id FROM employee_roles er
+                JOIN employees e ON e.id=er.employee_id
+                JOIN users u ON u.email=e.email
+                WHERE u.id=? AND er.is_team_lead=1 LIMIT 1
+            ");
+            $tlDept->execute([$uid]);
+            $deptId = $tlDept->fetchColumn();
+            if ($deptId) {
+                $chk = $conn->prepare("
+                    SELECT 1 FROM employee_roles er
+                    JOIN employees e ON e.id=er.employee_id
+                    JOIN users u ON u.email=e.email
+                    WHERE u.id=? AND er.dept_id=? AND er.is_team_lead=0
+                ");
+                $chk->execute([$ownerUserId, $deptId]);
+                $allowed = (bool)$chk->fetchColumn();
+            }
+        }
+
+        if ($allowed) {
+            if ($log_progress_ready) {
+                $conn->prepare("DELETE FROM hrms_learning_log_updates WHERE log_id = ?")->execute([$logId]);
+            }
+            $conn->prepare("DELETE FROM hrms_learning_logs WHERE id = ?")->execute([$logId]);
+            set_flash('success', 'Learning log entry deleted.');
+        } else {
+            set_flash('danger', 'You can only delete learning logs for your own team.');
+        }
+    }
+    header('Location: learning.php');
+    exit;
+}
+
 // ── Data for Employee view ─────────────────────────────────────────────────
 $my_learning_tasks = [];
 $my_badges         = [];
@@ -930,31 +987,55 @@ $badge_count   = $is_admin ? count($all_badge_awards) : count(array_filter($team
         <?php else: ?>
         <div class="list-group list-group-flush">
         <?php foreach ($team_logs as $log): ?>
-            <div class="list-group-item px-0" style="border-color:var(--card-bdr);">
-                <div class="small"><span class="fw-semibold"><?= sanitize($log['emp_name']) ?></span> — <?= sanitize($log['title']) ?></div>
-                <?php if ($log_status_ready): ?>
-                <div class="small text-muted mt-1 d-flex align-items-center gap-2 flex-wrap">
-                    <?php $tstatus = $log['status'] ?? 'completed'; ?>
-                    <?php if ($tstatus === 'pursuing'): ?>
-                    <span class="badge" style="background:#fef9c3;color:#854d0e;">🟡 Pursuing</span>
-                    <span>Started <?= date('d M Y', strtotime($log['learned_on'])) ?><?= isset($log['progress_pct']) ? ' — ' . (int)$log['progress_pct'] . '%' : '' ?></span>
-                    <?php elseif ($tstatus === 'dropped'): ?>
-                    <span class="badge" style="background:#f1f5f9;color:#64748b;">⛔ Dropped</span>
-                    <span>Started <?= date('d M Y', strtotime($log['learned_on'])) ?></span>
+            <div class="list-group-item px-0 d-flex align-items-start justify-content-between gap-2" style="border-color:var(--card-bdr);">
+                <div class="flex-grow-1">
+                    <div class="small"><span class="fw-semibold"><?= sanitize($log['emp_name']) ?></span> — <?= sanitize($log['title']) ?></div>
+                    <?php if ($log_status_ready): ?>
+                    <div class="small text-muted mt-1 d-flex align-items-center gap-2 flex-wrap">
+                        <?php $tstatus = $log['status'] ?? 'completed'; ?>
+                        <?php if ($tstatus === 'pursuing'): ?>
+                        <span class="badge" style="background:#fef9c3;color:#854d0e;">🟡 Pursuing</span>
+                        <span>Started <?= date('d M Y', strtotime($log['learned_on'])) ?><?= isset($log['progress_pct']) ? ' — ' . (int)$log['progress_pct'] . '%' : '' ?></span>
+                        <?php elseif ($tstatus === 'dropped'): ?>
+                        <span class="badge" style="background:#f1f5f9;color:#64748b;">⛔ Dropped</span>
+                        <span>Started <?= date('d M Y', strtotime($log['learned_on'])) ?></span>
+                        <?php else: ?>
+                        <span class="badge" style="background:#dcfce7;color:#166534;">✅ Completed</span>
+                        <span><?= date('d M Y', strtotime($log['learned_on'])) ?> → <?= $log['completed_on'] ? date('d M Y', strtotime($log['completed_on'])) : '—' ?></span>
+                        <?php if (!empty($log['proof_url'])): ?>
+                        <a href="<?= sanitize($log['proof_url']) ?>" target="_blank" rel="noopener noreferrer">🔗 Proof</a>
+                        <?php endif; ?>
+                        <?php endif; ?>
+                    </div>
                     <?php else: ?>
-                    <span class="badge" style="background:#dcfce7;color:#166534;">✅ Completed</span>
-                    <span><?= date('d M Y', strtotime($log['learned_on'])) ?> → <?= $log['completed_on'] ? date('d M Y', strtotime($log['completed_on'])) : '—' ?></span>
-                    <?php if (!empty($log['proof_url'])): ?>
-                    <a href="<?= sanitize($log['proof_url']) ?>" target="_blank" rel="noopener noreferrer">🔗 Proof</a>
+                    <div class="small text-muted mt-1"><?= date('d M Y', strtotime($log['learned_on'])) ?></div>
                     <?php endif; ?>
+                    <?php if ($log['notes']): ?>
+                    <div class="small text-muted mt-1"><?= nl2br(sanitize($log['notes'])) ?></div>
                     <?php endif; ?>
                 </div>
-                <?php else: ?>
-                <div class="small text-muted mt-1"><?= date('d M Y', strtotime($log['learned_on'])) ?></div>
-                <?php endif; ?>
-                <?php if ($log['notes']): ?>
-                <div class="small text-muted mt-1"><?= nl2br(sanitize($log['notes'])) ?></div>
-                <?php endif; ?>
+                <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2 flex-shrink-0" style="font-size:11px;" data-bs-toggle="modal" data-bs-target="#tl-del-log-<?= (int)$log['id'] ?>" title="Delete this log entry"><i class="bi bi-trash"></i></button>
+            </div>
+
+            <div class="modal fade" id="tl-del-log-<?= (int)$log['id'] ?>" tabindex="-1">
+              <div class="modal-dialog modal-dialog-centered">
+                <form method="POST" class="modal-content border-0 shadow-lg" style="border-radius:18px;">
+                    <input type="hidden" name="action" value="delete_team_learning_log">
+                    <input type="hidden" name="id" value="<?= (int)$log['id'] ?>">
+                    <input type="hidden" name="csrf_token" value="<?= sanitize(csrf_token()) ?>">
+                    <div class="modal-header border-0 pb-0 pt-4 px-4">
+                        <h5 class="modal-title fw-bold mb-0">Delete this log entry?</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                    </div>
+                    <div class="modal-body px-4 pt-3 pb-2">
+                        <p class="small text-muted mb-0"><span class="fw-semibold"><?= sanitize($log['emp_name']) ?></span> — <?= sanitize($log['title']) ?><br>This permanently removes the entry and cannot be undone.</p>
+                    </div>
+                    <div class="modal-footer border-0 px-4 pb-4 pt-2">
+                        <button type="button" class="btn btn-light btn-sm" data-bs-dismiss="modal">Cancel</button>
+                        <button type="submit" class="btn btn-danger btn-sm">Delete</button>
+                    </div>
+                </form>
+              </div>
             </div>
         <?php endforeach; ?>
         </div>
