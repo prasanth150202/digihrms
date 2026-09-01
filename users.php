@@ -81,6 +81,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $conn->prepare("UPDATE users SET name=?,email=?,role=?,emp_no=? WHERE id=?")
                  ->execute([trim($_POST['name']), trim($_POST['email']), $_POST['role'], $emp_no, $id]);
         }
+        // AI Copilot beta access (column added by migrate_ai_agent.php)
+        try {
+            $conn->prepare("UPDATE users SET is_beta_tester=? WHERE id=?")
+                 ->execute([isset($_POST['is_beta_tester']) ? 1 : 0, $id]);
+        } catch (Exception $e) { /* migration not run yet */ }
         set_flash('success', 'User updated.');
         header("Location: users.php"); exit;
     }
@@ -507,6 +512,17 @@ function copyInviteLink() {
                         </label>
                         <input type="password" name="password" class="form-control" placeholder="••••••••">
                     </div>
+                    <div class="col-12">
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" name="is_beta_tester" id="edit_is_beta" value="1">
+                            <label class="form-check-label small" for="edit_is_beta">
+                                <i class="bi bi-stars text-primary me-1"></i>AI Copilot beta
+                                <span class="text-muted fw-normal d-block" style="font-size:.72rem;">
+                                    Tech team only. Grants the in-app AI agent that can read and modify the HRMS database directly.
+                                </span>
+                            </label>
+                        </div>
+                    </div>
                 </div>
             </div>
             <div class="modal-footer border-0 px-4 pb-4 pt-2">
@@ -524,6 +540,7 @@ function openEdit(u) {
     document.getElementById('edit_email').value  = u.email;
     document.getElementById('edit_role').value   = u.role;
     document.getElementById('edit_emp_no').value = u.emp_no || '';
+    document.getElementById('edit_is_beta').checked = u.is_beta_tester == 1;
     new bootstrap.Modal(document.getElementById('editModal')).show();
 }
 

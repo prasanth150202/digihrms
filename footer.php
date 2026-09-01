@@ -151,5 +151,15 @@ function showConfirm(msg, { title='Are you sure?', okText='Confirm', okColor='#e
     });
 }
 </script>
+
+<?php
+// ── AI Copilot (beta, tech-team only) ─────────────────────────────────────
+if (isset($_SESSION['user'])) {
+    $__aic_widget = __DIR__ . '/ai_agent_widget.php';
+    if (file_exists($__aic_widget)) {
+        try { include $__aic_widget; } catch (Throwable $__e) { /* never break the page */ }
+    }
+}
+?>
 </body>
 </html>
