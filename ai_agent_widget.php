@@ -39,6 +39,13 @@ $__cfg_ok = aiagent_configured();
  display:flex;gap:6px;align-items:center;background:rgba(148,163,184,.1)}
 .aic-tool-bd{padding:8px 9px;border-top:1px solid var(--card-bdr,#e2e8f0);display:none}
 .aic-tool-bd.show{display:block}
+.aic-steps{align-self:flex-start;max-width:94%;font-size:11px}
+.aic-steps-hd{cursor:pointer;color:var(--text-muted,#94a3b8);font-weight:600;padding:2px 0;user-select:none}
+.aic-steps-hd i{transition:transform .15s;font-size:10px}
+.aic-steps.open .aic-steps-hd i{transform:rotate(90deg)}
+.aic-steps-bd{display:none;margin-top:4px;border-left:2px solid var(--card-bdr,#e2e8f0);padding-left:8px}
+.aic-steps.open .aic-steps-bd{display:block}
+.aic-step{white-space:pre-wrap;word-break:break-word;color:var(--text-muted,#94a3b8);font-size:10.5px;margin:2px 0;font-family:ui-monospace,Menlo,monospace}
 .aic-msg pre{background:#0f172a;color:#e2e8f0;padding:9px 11px;border-radius:8px;overflow-x:auto;font-size:11.5px;margin:6px 0}
 .aic-msg code{background:rgba(148,163,184,.18);padding:1px 5px;border-radius:4px;font-size:12px}
 .aic-msg pre code{background:none;padding:0}
@@ -132,38 +139,58 @@ $__cfg_ok = aiagent_configured();
     return d;
   }
 
-  function toolBubble(name, content){
-    const d = document.createElement('div');
-    d.className = 'aic-msg tool';
-    let inner;
-    try { inner = JSON.stringify(JSON.parse(content), null, 1); } catch(e){ inner = content; }
-    d.innerHTML = '<div class="aic-tool-box"><div class="aic-tool-hd"><i class="bi bi-wrench-adjustable"></i>'+esc(name)+
-      ' <span style="flex:1"></span><i class="bi bi-chevron-down"></i></div><div class="aic-tool-bd"><pre>'+esc(inner)+'</pre></div></div>';
-    d.querySelector('.aic-tool-hd').onclick = () => d.querySelector('.aic-tool-bd').classList.toggle('show');
-    body.appendChild(d); scroll();
-  }
-
   const scroll = () => { body.scrollTop = body.scrollHeight; };
-
   function setBusy(b){ busy = b; sendBtn.disabled = b; input.disabled = b; }
 
+  // one dim, collapsed "N steps" block for all the tool activity in a turn
+  let stepBuf = [];
+  function pushStep(line){ stepBuf.push(line); }
+  function flushSteps(){
+    if(!stepBuf.length) return;
+    const lines = stepBuf.slice(); stepBuf = [];
+    const n = lines.length;
+    const d = document.createElement('div');
+    d.className = 'aic-steps';
+    d.innerHTML = '<div class="aic-steps-hd">⚙ '+n+' step'+(n>1?'s':'')+
+      ' <i class="bi bi-chevron-right"></i></div><div class="aic-steps-bd"></div>';
+    const bd = d.querySelector('.aic-steps-bd');
+    lines.forEach(l => { const p = document.createElement('pre'); p.className='aic-step'; p.textContent = l; bd.appendChild(p); });
+    d.querySelector('.aic-steps-hd').onclick = () => d.classList.toggle('open');
+    body.appendChild(d);
+  }
+  function summariseResult(content){
+    try {
+      const j = JSON.parse(content);
+      if(j.error)  return '⤷ ' + (j.blocked ? 'blocked: ' : 'error: ') + j.error;
+      if('row_count' in j) return '⤷ ' + j.row_count + ' row' + (j.row_count===1?'':'s');
+      if(j.rows_affected != null) return '⤷ ' + j.rows_affected + ' row(s) affected';
+      if(j.ok) return '⤷ done';
+      if(j.tables) return '⤷ ' + j.tables.length + ' tables';
+      if(j.note) return '⤷ ' + j.note;
+    } catch(e){}
+    return '⤷ ' + String(content).slice(0,80);
+  }
+
   async function render(){
-    body.innerHTML = '';
-    if(!convId){ body.innerHTML = '<div class="aic-empty">Ask me anything about DigiHRMS.<br>I can read and change the database directly.</div>'; return; }
+    body.innerHTML = ''; stepBuf = [];
+    if(!convId){ body.innerHTML = '<div class="aic-empty">Ask me about tasks, projects, workflows and triggers.<br>I can look things up and make changes (with your OK).</div>'; return; }
     const r = await fetch('ai_agent.php?action=messages&conversation_id=' + convId).then(x=>x.json());
     if(r.error){ body.innerHTML = '<div class="aic-empty">'+esc(r.error)+'</div>'; return; }
     for(const m of (r.messages||[])){
-      if(m.role === 'user') bubble('user', m.content);
-      else if(m.role === 'tool') toolBubble(m.name || 'tool', m.content);
+      if(m.role === 'user'){ flushSteps(); bubble('user', m.content); }
+      else if(m.role === 'tool'){ pushStep(summariseResult(m.content)); }
       else if(m.role === 'assistant'){
-        if(m.content && m.content.trim()) bubble('bot', m.content);
         if(m.tool_calls){
           try { JSON.parse(m.tool_calls).forEach(tc => {
-            toolBubble('→ ' + tc.function.name, tc.function.arguments);
+            let a = tc.function.arguments;
+            try { const o = JSON.parse(a); a = o.sql || o.table || JSON.stringify(o); } catch(e){}
+            pushStep(tc.function.name + ': ' + String(a).replace(/\s+/g,' ').slice(0,160));
           }); } catch(e){}
         }
+        if(m.content && m.content.trim()){ flushSteps(); bubble('bot', m.content); }
       }
     }
+    flushSteps();
     scroll();
   }
 
