@@ -131,7 +131,8 @@ function aiagent_chat(array $messages, array $tools = []): array {
         throw new RuntimeException("LLM returned non-JSON (HTTP $code) from POST $url — model '" . aiagent_model() . "'. Body: " . ($body === '' ? '(empty)' : $body));
     }
     if ($code >= 400) {
-        $m = $json['error']['message'] ?? $json['message'] ?? "HTTP $code";
+        $m = $json['error']['message'] ?? $json['message']
+             ?? ('HTTP ' . $code . ' from ' . $url . ' (model ' . aiagent_model() . ') — ' . substr(trim((string) $raw), 0, 200));
         throw new RuntimeException("LLM API error (HTTP $code): $m");
     }
     return $json;
