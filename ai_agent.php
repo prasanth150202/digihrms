@@ -178,29 +178,31 @@ function aiagent_run_loop(PDO $conn, int $cid, array $U, array $approvals): arra
         }
 
         // 2. Otherwise, ask the model for the next step.
-        $resp   = aiagent_chat(aiagent_openai_messages($rows), aiagent_tool_specs());
-        $choice = $resp['choices'][0]['message'] ?? [];
-        $text   = $choice['content'] ?? '';
-        if (is_array($text)) {   // some providers return content as parts
-            $text = implode('', array_map(
-                fn($p) => is_array($p) ? ($p['text'] ?? '') : (string) $p, $text));
-        }
-        $calls  = $choice['tool_calls'] ?? [];
+        $resp  = aiagent_chat(aiagent_openai_messages($rows), aiagent_tool_specs());
+        $text  = aiagent_message_text($resp['choices'][0]['message'] ?? []);
+        $calls = $resp['choices'][0]['message']['tool_calls'] ?? [];
 
-        aiagent_add_message(
-            $conn, $cid, 'assistant', (string) $text,
-            $calls ? json_encode($calls) : null
-        );
-
-        if (!$calls) {
-            $conn->prepare("UPDATE ai_agent_conversations SET updated_at = NOW() WHERE id = ?")->execute([$cid]);
-            $reply = trim((string) $text);
-            if ($reply === '') {
-                $reply = "_(No answer produced. The query may have returned no rows, or it needed a table "
-                       . "that's out of scope. Try rephrasing, or check the tool steps above.)_";
-            }
-            return ['status' => 'done', 'conversation_id' => $cid, 'reply' => $reply];
+        if ($calls) {
+            aiagent_add_message($conn, $cid, 'assistant', $text, json_encode($calls));
+            continue;
         }
+
+        // No tool calls -> this is the final turn.
+        if ($text === '') {
+            // Model stopped without writing an answer -> force one plain-text synthesis pass.
+            $msgs = aiagent_openai_messages($rows);
+            $msgs[] = ['role' => 'user', 'content' =>
+                'Now answer my question in plain English using what you found above. '
+                . 'Short markdown table if useful. Do not call any tools.'];
+            try {
+                $text = aiagent_message_text(aiagent_chat($msgs)['choices'][0]['message'] ?? []);
+            } catch (Throwable $e) { /* fall through */ }
+        }
+        $reply = trim($text) !== '' ? trim($text)
+            : "_(I ran the lookup but didn't get a written summary back — the data is in the steps above. Try asking again.)_";
+        aiagent_add_message($conn, $cid, 'assistant', $reply, null);
+        $conn->prepare("UPDATE ai_agent_conversations SET updated_at = NOW() WHERE id = ?")->execute([$cid]);
+        return ['status' => 'done', 'conversation_id' => $cid, 'reply' => $reply];
     }
 
     return [
@@ -256,6 +258,16 @@ function aiagent_unprocessed_tool_calls(array $rows): array {
         return array_values(array_filter($calls, fn($c) => empty($doneIds[$c['id'] ?? ''])));
     }
     return [];
+}
+
+/** Extract plain text from an assistant message, tolerating array-shaped content. */
+function aiagent_message_text(array $msg): string {
+    $c = $msg['content'] ?? '';
+    if (is_array($c)) {
+        $c = implode('', array_map(
+            fn($p) => is_array($p) ? ($p['text'] ?? '') : (string) $p, $c));
+    }
+    return trim((string) $c);
 }
 
 /** Signatures ("name|argsJson") of tool calls that already ran in this conversation. */
