@@ -171,10 +171,13 @@ $__cfg_ok = aiagent_configured();
     for(const p of pending){
       const d = document.createElement('div');
       d.className = 'aic-confirm' + (p.dangerous ? ' danger' : '');
-      d.innerHTML = '<div class="lbl">'+(p.dangerous?'⚠ Destructive — review carefully':'Confirm write')+'</div>'+
+      const label = p.dangerous ? '⚠ Destructive — review carefully'
+                  : (p.label || 'Confirm action');
+      const detail = p.sql || p.detail || '';
+      d.innerHTML = '<div class="lbl">'+esc(label)+'</div>'+
         (p.reason ? '<p>'+esc(p.reason)+'</p>' : '')+
-        '<pre>'+esc(p.sql)+'</pre>'+
-        '<div class="btns"><button class="aic-run">Run</button><button class="aic-skip">Skip</button></div>';
+        (detail ? '<pre>'+esc(detail)+'</pre>' : '')+
+        '<div class="btns"><button class="aic-run">'+esc(p.okText||'Run')+'</button><button class="aic-skip">Skip</button></div>';
       d.querySelector('.aic-run').onclick  = () => resume(p.tool_call_id, true, d);
       d.querySelector('.aic-skip').onclick = () => resume(p.tool_call_id, false, d);
       body.appendChild(d);

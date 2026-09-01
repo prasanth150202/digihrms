@@ -105,12 +105,39 @@ function aiagent_sql_is_dangerous(string $sql): bool {
 }
 
 /**
- * Every write needs the user's explicit Run/Skip confirmation — no exceptions.
+ * Every action with a side effect needs the user's explicit Run/Skip confirmation.
+ * Read-only tools (list_tables, describe_table, SELECT) run without a prompt.
  */
 function aiagent_needs_confirmation(string $tool, array $args): bool {
+    if ($tool === 'send_notification') return true;
     if ($tool !== 'run_sql') return false;
     $sql = trim((string) ($args['sql'] ?? ''));
     return $sql !== '' && !aiagent_sql_is_readonly($sql);
+}
+
+/** Human-readable confirmation card for a pending side-effecting tool call. */
+function aiagent_confirm_card(string $tool, array $args): array {
+    if ($tool === 'run_sql') {
+        $sql = (string) ($args['sql'] ?? '');
+        return [
+            'label'     => 'Confirm database write',
+            'detail'    => $sql,
+            'reason'    => (string) ($args['reason'] ?? ''),
+            'dangerous' => aiagent_sql_is_dangerous($sql),
+            'okText'    => 'Run',
+        ];
+    }
+    if ($tool === 'send_notification') {
+        $uid = (int) ($args['user_id'] ?? 0);
+        return [
+            'label'     => "Send a notification to user #$uid",
+            'detail'    => trim(((string) ($args['title'] ?? '')) . "\n" . ((string) ($args['body'] ?? ''))),
+            'reason'    => '',
+            'dangerous' => false,
+            'okText'    => 'Send',
+        ];
+    }
+    return ['label' => "Confirm $tool", 'detail' => json_encode($args), 'dangerous' => false, 'okText' => 'Run'];
 }
 
 /**

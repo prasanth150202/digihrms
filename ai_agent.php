@@ -118,10 +118,12 @@ function aiagent_run_loop(PDO $conn, int $cid, array $U, array $approvals): arra
         $pending = aiagent_unprocessed_tool_calls($rows);
         if ($pending) {
             $needConfirm = [];
+            $doneSigs = aiagent_executed_signatures($rows);
             foreach ($pending as $tc) {
                 $name = $tc['function']['name'] ?? '';
                 $args = json_decode($tc['function']['arguments'] ?? '{}', true) ?: [];
                 $tcId = $tc['id'];
+                $sig  = $name . '|' . json_encode($args);
 
                 // Reject out-of-scope / DDL BEFORE it can reach a confirmation card.
                 $pre = aiagent_precheck_tool($conn, $name, $args);
@@ -135,15 +137,20 @@ function aiagent_run_loop(PDO $conn, int $cid, array $U, array $approvals): arra
                     continue;
                 }
 
+                // Don't repeat an identical call already made in this conversation.
+                if (isset($doneSigs[$sig]) && $name !== 'run_sql') {
+                    aiagent_add_message($conn, $cid, 'tool',
+                        json_encode(['note' => 'Identical call already made earlier — not repeated.']),
+                        null, $tcId, $name);
+                    continue;
+                }
+
                 if (aiagent_needs_confirmation($name, $args)) {
                     if (!array_key_exists($tcId, $approvals)) {
-                        $needConfirm[] = [
-                            'tool_call_id' => $tcId,
-                            'tool'         => $name,
-                            'sql'          => $args['sql'] ?? '',
-                            'reason'       => $args['reason'] ?? '',
-                            'dangerous'    => aiagent_sql_is_dangerous((string) ($args['sql'] ?? '')),
-                        ];
+                        $needConfirm[] = array_merge(
+                            ['tool_call_id' => $tcId, 'tool' => $name],
+                            aiagent_confirm_card($name, $args)
+                        );
                         continue;
                     }
                     if ($approvals[$tcId] === false) {
@@ -240,6 +247,25 @@ function aiagent_unprocessed_tool_calls(array $rows): array {
         return array_values(array_filter($calls, fn($c) => empty($doneIds[$c['id'] ?? ''])));
     }
     return [];
+}
+
+/** Signatures ("name|argsJson") of tool calls that already ran in this conversation. */
+function aiagent_executed_signatures(array $rows): array {
+    $done = [];
+    $responded = [];
+    foreach ($rows as $r) {
+        if ($r['role'] === 'tool' && $r['tool_call_id']) $responded[$r['tool_call_id']] = true;
+    }
+    foreach ($rows as $r) {
+        if ($r['role'] !== 'assistant' || empty($r['tool_calls'])) continue;
+        foreach (json_decode($r['tool_calls'], true) ?: [] as $tc) {
+            if (empty($responded[$tc['id'] ?? ''])) continue;
+            $name = $tc['function']['name'] ?? '';
+            $args = json_decode($tc['function']['arguments'] ?? '{}', true) ?: [];
+            $done[$name . '|' . json_encode($args)] = true;
+        }
+    }
+    return $done;
 }
 
 /** Convert stored rows to OpenAI chat-completions message format. */
