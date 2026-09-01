@@ -70,11 +70,19 @@ function aiagent_chat(array $messages, array $tools = []): array {
         $payload['tool_choice'] = 'auto';
     }
 
-    $ch = curl_init(aiagent_base_url() . '/chat/completions');
+    $url  = aiagent_base_url() . '/chat/completions';
+    $post = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+    if ($post === false) {
+        throw new RuntimeException('Could not encode request payload: ' . json_last_error_msg());
+    }
+
+    $ch = curl_init($url);
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_POST           => true,
-        CURLOPT_POSTFIELDS     => json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+        CURLOPT_CUSTOMREQUEST  => 'POST',
+        CURLOPT_POSTFIELDS     => $post,
+        CURLOPT_FOLLOWLOCATION => true,
         CURLOPT_TIMEOUT        => 120,
         CURLOPT_HTTPHEADER     => [
             'Content-Type: application/json',
@@ -88,12 +96,15 @@ function aiagent_chat(array $messages, array $tools = []): array {
     $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
 
-    if ($raw === false)          throw new RuntimeException("LLM request failed: $err");
+    if ($raw === false)  throw new RuntimeException("LLM request failed ($url): $err");
     $json = json_decode($raw, true);
-    if (!is_array($json))        throw new RuntimeException("LLM returned non-JSON (HTTP $code): " . substr((string)$raw, 0, 300));
+    if (!is_array($json)) {
+        $body = trim(substr((string) $raw, 0, 300));
+        throw new RuntimeException("LLM returned non-JSON (HTTP $code) from POST $url — model '" . aiagent_model() . "'. Body: " . ($body === '' ? '(empty)' : $body));
+    }
     if ($code >= 400) {
         $m = $json['error']['message'] ?? $json['message'] ?? "HTTP $code";
-        throw new RuntimeException("LLM API error: $m");
+        throw new RuntimeException("LLM API error (HTTP $code): $m");
     }
     return $json;
 }
