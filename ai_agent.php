@@ -108,7 +108,7 @@ try {
 /* ── Agent loop ─────────────────────────────────────────────────────────── */
 
 function aiagent_run_loop(PDO $conn, int $cid, array $U, array $approvals): array {
-    $maxSteps = 8;
+    $maxSteps = 12;
 
     for ($step = 0; $step < $maxSteps; $step++) {
         $rows = aiagent_fetch_rows($conn, $cid);
@@ -205,10 +205,20 @@ function aiagent_run_loop(PDO $conn, int $cid, array $U, array $approvals): arra
         return ['status' => 'done', 'conversation_id' => $cid, 'reply' => $reply];
     }
 
-    return [
-        'status' => 'done', 'conversation_id' => $cid,
-        'reply'  => "_(Stopped after $maxSteps steps. Ask me to continue if needed.)_",
-    ];
+    // Hit the step limit — make the model summarise what it has, no more tools.
+    $reply = '';
+    try {
+        $msgs = aiagent_openai_messages(aiagent_fetch_rows($conn, $cid));
+        $msgs[] = ['role' => 'user', 'content' =>
+            'Stop here and answer my original question in plain English with what you have so far. Do not call tools.'];
+        $reply = aiagent_message_text(aiagent_chat($msgs)['choices'][0]['message'] ?? []);
+    } catch (Throwable $e) { /* fall through */ }
+    if ($reply === '') {
+        $reply = "_(This took too many steps — check the steps above, or try a more specific question.)_";
+    }
+    aiagent_add_message($conn, $cid, 'assistant', $reply, null);
+    $conn->prepare("UPDATE ai_agent_conversations SET updated_at = NOW() WHERE id = ?")->execute([$cid]);
+    return ['status' => 'done', 'conversation_id' => $cid, 'reply' => $reply];
 }
 
 /* ── Helpers ────────────────────────────────────────────────────────────── */

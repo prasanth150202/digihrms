@@ -232,8 +232,12 @@ $__cfg_ok = aiagent_configured();
   async function handle(r){
     if(r.conversation_id){ convId = String(r.conversation_id); localStorage.setItem(LS, convId); }
     await render();
-    if(r.status === 'confirm') renderConfirm(r.pending);
-    else if(r.error) bubble('bot', '⚠ ' + r.error);
+    if(r.status === 'confirm'){ renderConfirm(r.pending); return; }
+    if(r.error){ bubble('bot', '⚠ ' + r.error); return; }
+    // safety net: if the transcript rendered no answer at all, show the returned reply
+    if(r.status === 'done' && r.reply && !body.querySelector('.aic-msg.bot')){
+      bubble('bot', r.reply);
+    }
   }
 
   async function send(){
