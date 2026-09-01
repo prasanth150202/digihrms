@@ -123,6 +123,18 @@ function aiagent_run_loop(PDO $conn, int $cid, array $U, array $approvals): arra
                 $args = json_decode($tc['function']['arguments'] ?? '{}', true) ?: [];
                 $tcId = $tc['id'];
 
+                // Reject out-of-scope / DDL BEFORE it can reach a confirmation card.
+                $pre = aiagent_precheck_tool($conn, $name, $args);
+                if ($pre !== null) {
+                    aiagent_audit([
+                        'user_id' => $U['id'], 'conversation_id' => $cid, 'tool' => $name,
+                        'arguments' => json_encode($args), 'status' => 'blocked', 'error' => $pre,
+                    ]);
+                    aiagent_add_message($conn, $cid, 'tool',
+                        json_encode(['error' => $pre, 'blocked' => true]), null, $tcId, $name);
+                    continue;
+                }
+
                 if (aiagent_needs_confirmation($name, $args)) {
                     if (!array_key_exists($tcId, $approvals)) {
                         $needConfirm[] = [

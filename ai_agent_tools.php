@@ -165,6 +165,26 @@ function aiagent_scope_check(PDO $conn, string $sql, bool $readonly): ?string {
     return null;
 }
 
+/**
+ * Fast pre-flight run in the agent loop BEFORE any confirmation card is shown.
+ * Returns an error string for out-of-scope / DDL calls, or null if the call may proceed.
+ */
+function aiagent_precheck_tool(PDO $conn, string $tool, array $args): ?string {
+    if ($tool === 'run_sql') {
+        $sql = trim(rtrim(trim((string) ($args['sql'] ?? '')), ';'));
+        if ($sql === '') return null;
+        return aiagent_scope_check($conn, $sql, aiagent_sql_is_readonly($sql));
+    }
+    if ($tool === 'describe_table') {
+        $scope = array_unique(array_merge(aiagent_write_tables(), aiagent_read_tables()));
+        $t = strtolower((string) ($args['table'] ?? ''));
+        if ($t !== '' && !in_array($t, $scope, true)) {
+            return "'$t' is outside the Copilot's scope (task & workflow tables only).";
+        }
+    }
+    return null;
+}
+
 /* ── Executor ────────────────────────────────────────────────────────────── */
 
 /**
