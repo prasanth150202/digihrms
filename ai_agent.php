@@ -181,6 +181,10 @@ function aiagent_run_loop(PDO $conn, int $cid, array $U, array $approvals): arra
         $resp   = aiagent_chat(aiagent_openai_messages($rows), aiagent_tool_specs());
         $choice = $resp['choices'][0]['message'] ?? [];
         $text   = $choice['content'] ?? '';
+        if (is_array($text)) {   // some providers return content as parts
+            $text = implode('', array_map(
+                fn($p) => is_array($p) ? ($p['text'] ?? '') : (string) $p, $text));
+        }
         $calls  = $choice['tool_calls'] ?? [];
 
         aiagent_add_message(
@@ -190,7 +194,12 @@ function aiagent_run_loop(PDO $conn, int $cid, array $U, array $approvals): arra
 
         if (!$calls) {
             $conn->prepare("UPDATE ai_agent_conversations SET updated_at = NOW() WHERE id = ?")->execute([$cid]);
-            return ['status' => 'done', 'conversation_id' => $cid, 'reply' => (string) $text];
+            $reply = trim((string) $text);
+            if ($reply === '') {
+                $reply = "_(No answer produced. The query may have returned no rows, or it needed a table "
+                       . "that's out of scope. Try rephrasing, or check the tool steps above.)_";
+            }
+            return ['status' => 'done', 'conversation_id' => $cid, 'reply' => $reply];
         }
     }
 

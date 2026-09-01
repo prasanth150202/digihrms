@@ -55,12 +55,23 @@ function aiagent_write_tables(): array {
 }
 
 /**
- * Extra tables the Copilot may SELECT from but never write.
- * Empty by default (per request: task & workflow only). Add e.g. "users,employees"
- * here if you want it to resolve assignee names.
+ * Extra tables the Copilot may SELECT from but never write. Needed so it can
+ * resolve people by name / show assignees. Sensitive data (salary, leaves,
+ * candidates, payroll…) lives in other tables and stays blocked.
+ * Set AI_AGENT_READ_TABLES= (empty) in .env to lock it to task/workflow only.
  */
 function aiagent_read_tables(): array {
-    return aiagent_csv_cfg('AI_AGENT_READ_TABLES', '');
+    $raw = $_ENV['AI_AGENT_READ_TABLES'] ?? getenv('AI_AGENT_READ_TABLES');
+    if ($raw === '') return [];                       // explicitly emptied in .env
+    if ($raw === false || $raw === null) {            // not set -> sensible default
+        $raw = 'users,employees,departments,employee_roles,roles';
+    }
+    $out = [];
+    foreach (explode(',', (string) $raw) as $t) {
+        $t = trim($t);
+        if ($t !== '' && preg_match('/^[A-Za-z0-9_]+$/', $t)) $out[] = strtolower($t);
+    }
+    return array_values(array_unique($out));
 }
 
 /** Is the current logged-in user a tech-team beta tester? */
