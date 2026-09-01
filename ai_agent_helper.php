@@ -3,13 +3,16 @@
  * DigiHRMS AI Copilot (BETA) — shared helpers.
  *
  * Add to .env:
- *   OPENROUTER_API_KEY=sk-or-v1-........................
- *   OPENROUTER_MODEL=deepseek/deepseek-chat-v3-0324:free
- *   OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
- *   AI_AGENT_CONFIRM_WRITES=true     # show non-SELECT SQL for confirmation before running
+ *   OPENROUTER_API_KEY=...                       (OpenRouter sk-or-… or NVIDIA nvapi-… key)
+ *   OPENROUTER_MODEL=meta/llama-3.3-70b-instruct
+ *   OPENROUTER_BASE_URL=https://integrate.api.nvidia.com/v1
  *
- * OPENROUTER_BASE_URL is swappable — point it at a LAN Ollama box
- * (http://192.168.x.x:11434/v1) with OPENROUTER_API_KEY=ollama to go fully local.
+ * Optional — override the table scope (defaults are task & workflow tables):
+ *   AI_AGENT_WRITE_TABLES=tasks,task_comments,...
+ *   AI_AGENT_READ_TABLES=users,employees            (extra SELECT-only tables; empty by default)
+ *
+ * OPENROUTER_BASE_URL is swappable — OpenRouter, NVIDIA NIM, or a LAN Ollama box
+ * (http://192.168.x.x:11434/v1 with OPENROUTER_API_KEY=ollama).
  */
 
 require_once __DIR__ . '/config.php';
@@ -27,12 +30,37 @@ function aiagent_base_url(): string {
     return rtrim(aiagent_cfg('OPENROUTER_BASE_URL', 'https://openrouter.ai/api/v1'), '/');
 }
 
-function aiagent_confirm_writes(): bool {
-    return strtolower((string) aiagent_cfg('AI_AGENT_CONFIRM_WRITES', 'true')) !== 'false';
-}
-
 function aiagent_configured(): bool {
     return aiagent_cfg('OPENROUTER_API_KEY') !== null;
+}
+
+/** Comma-separated .env value -> array of valid identifiers. */
+function aiagent_csv_cfg(string $key, string $default): array {
+    $out = [];
+    foreach (explode(',', (string) aiagent_cfg($key, $default)) as $t) {
+        $t = trim($t);
+        if ($t !== '' && preg_match('/^[A-Za-z0-9_]+$/', $t)) $out[] = strtolower($t);
+    }
+    return array_values(array_unique($out));
+}
+
+/** Tables the Copilot may INSERT/UPDATE/DELETE. Everything else is denied. */
+function aiagent_write_tables(): array {
+    return aiagent_csv_cfg('AI_AGENT_WRITE_TABLES',
+        'tasks,task_comments,task_time_logs,task_timers,task_activity_logs,task_approvals,'
+        . 'task_block_requests,task_tags,subtasks,hrms_task_quiz,hrms_task_quiz_attempts,projects,'
+        . 'hrms_triggers,hrms_trigger_log,hrms_trigger_login_track,'
+        . 'hrms_workflow_templates,hrms_workflow_versions,hrms_workflow_runs,hrms_workflow_node_log,'
+        . 'hrms_workflow_task_instances,hrms_workflow_approval_log,workflow_submissions,workflow_approval_steps');
+}
+
+/**
+ * Extra tables the Copilot may SELECT from but never write.
+ * Empty by default (per request: task & workflow only). Add e.g. "users,employees"
+ * here if you want it to resolve assignee names.
+ */
+function aiagent_read_tables(): array {
+    return aiagent_csv_cfg('AI_AGENT_READ_TABLES', '');
 }
 
 /** Is the current logged-in user a tech-team beta tester? */

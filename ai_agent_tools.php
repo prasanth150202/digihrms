@@ -2,11 +2,11 @@
 /**
  * DigiHRMS AI Copilot (BETA) — tool definitions & executors.
  *
- * The agent is intentionally all-powerful for the tech team: run_sql executes
- * arbitrary SQL against the live HRMS database. Every call is written to
- * ai_agent_audit. Non-SELECT statements are surfaced to the user for an explicit
- * Run/Skip confirmation (unless AI_AGENT_CONFIRM_WRITES=false, and always for
- * destructive statements).
+ * The agent is scoped to task & workflow tables only (see aiagent_write_tables /
+ * aiagent_read_tables in ai_agent_helper.php — both overridable via .env). Any SQL
+ * touching another table, or any DDL, is blocked before it runs. Every call is
+ * written to ai_agent_audit. Every INSERT/UPDATE/DELETE is surfaced to the user
+ * for an explicit Run/Skip confirmation — no exceptions.
  */
 
 require_once __DIR__ . '/ai_agent_helper.php';
@@ -44,10 +44,11 @@ function aiagent_tool_specs(): array {
             'function' => [
                 'name' => 'run_sql',
                 'description' =>
-                    'Execute a single SQL statement against the HRMS MySQL database. '
+                    'Execute a single SQL statement — ONLY against task & workflow tables (call list_tables to see which). '
                     . 'SELECT/SHOW/DESCRIBE/EXPLAIN run immediately and return rows. '
-                    . 'INSERT/UPDATE/DELETE/ALTER/etc. are shown to the user for confirmation before running. '
-                    . 'Use standard MySQL syntax. One statement per call, no trailing semicolon needed.',
+                    . 'INSERT/UPDATE/DELETE are shown to the user for an explicit Run/Skip confirmation before running. '
+                    . 'Schema changes (ALTER/DROP/CREATE/TRUNCATE) and any other table are blocked. '
+                    . 'Standard MySQL syntax, one statement per call, no trailing semicolon.',
                 'parameters' => [
                     'type' => 'object',
                     'properties' => [
@@ -104,14 +105,64 @@ function aiagent_sql_is_dangerous(string $sql): bool {
 }
 
 /**
- * Does this tool call need user confirmation before it runs?
+ * Every write needs the user's explicit Run/Skip confirmation — no exceptions.
  */
 function aiagent_needs_confirmation(string $tool, array $args): bool {
     if ($tool !== 'run_sql') return false;
     $sql = trim((string) ($args['sql'] ?? ''));
-    if ($sql === '' || aiagent_sql_is_readonly($sql)) return false;
-    if (aiagent_sql_is_dangerous($sql)) return true;
-    return aiagent_confirm_writes();
+    return $sql !== '' && !aiagent_sql_is_readonly($sql);
+}
+
+/**
+ * Scope guard: the Copilot may only touch task & workflow tables.
+ * Returns an error string to hand back to the model, or null if the SQL is in scope.
+ */
+function aiagent_scope_check(PDO $conn, string $sql, bool $readonly): ?string {
+    // 1. No schema / privileged / file / multi-statement operations, ever.
+    if (preg_match('/\b(DROP|ALTER|CREATE|TRUNCATE|RENAME|GRANT|REVOKE|FLUSH|LOCK|UNLOCK|CALL|PREPARE|EXECUTE|SET\s+GLOBAL|LOAD\s+DATA|INTO\s+(OUT|DUMP)FILE)\b/i', $sql)) {
+        return 'Blocked: the Copilot can only read and modify rows in task & workflow tables. '
+             . 'Schema changes, privileged statements and file operations are not allowed.';
+    }
+    if (str_contains(rtrim($sql, "; \t\n\r"), ';')) {
+        return 'Blocked: only one SQL statement per call.';
+    }
+
+    $writeTables = aiagent_write_tables();
+    $allowed = $readonly
+        ? array_unique(array_merge($writeTables, aiagent_read_tables()))
+        : $writeTables;
+
+    // 2. Compare against REAL table names, so aliases/spacing can't smuggle a table past us.
+    static $realTables = null;
+    if ($realTables === null) {
+        $realTables = array_map('strtolower', $conn->query("SHOW TABLES")->fetchAll(PDO::FETCH_COLUMN));
+    }
+    $lc = strtolower($sql);
+    $outOfScope = [];
+    foreach ($realTables as $t) {
+        if (in_array($t, $allowed, true)) continue;
+        if (preg_match('/(?<![a-z0-9_])' . preg_quote($t, '/') . '(?![a-z0-9_])/', $lc)) {
+            $outOfScope[] = $t;
+        }
+    }
+    if ($outOfScope) {
+        return 'Out of scope: references ' . implode(', ', array_unique($outOfScope))
+             . '. The Copilot may ' . ($readonly ? 'read' : 'write') . ' only: ' . implode(', ', $allowed);
+    }
+
+    // 3. A write must actually target one of the allowed tables.
+    if (!$readonly) {
+        $hitsAllowed = false;
+        foreach ($writeTables as $t) {
+            if (preg_match('/\b(INTO|UPDATE|TABLE|FROM)\s+`?' . preg_quote($t, '/') . '`?(?![a-z0-9_])/i', $sql)) {
+                $hitsAllowed = true; break;
+            }
+        }
+        if (!$hitsAllowed) {
+            return 'Blocked: could not confirm this write targets an allowed task/workflow table.';
+        }
+    }
+    return null;
 }
 
 /* ── Executor ────────────────────────────────────────────────────────────── */
@@ -147,7 +198,7 @@ function aiagent_execute_tool(string $tool, array $args, array $ctx, bool $confi
 
         $preview = json_encode($result, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         aiagent_audit_update($auditId, [
-            'status'         => isset($result['error']) ? 'error' : 'ok',
+            'status'         => !empty($result['blocked']) ? 'blocked' : (isset($result['error']) ? 'error' : 'ok'),
             'rows_affected'  => $result['rows_affected'] ?? $result['row_count'] ?? null,
             'result_preview' => mb_substr($preview, 0, 4000),
             'error'          => $result['error'] ?? null,
@@ -168,14 +219,25 @@ function aiagent_clip(string $s): string {
 
 function aiagent_tool_list_tables(): array {
     global $conn;
-    $tables = $conn->query("SHOW TABLES")->fetchAll(PDO::FETCH_COLUMN);
-    return ['tables' => $tables, 'count' => count($tables)];
+    $real  = array_map('strtolower', $conn->query("SHOW TABLES")->fetchAll(PDO::FETCH_COLUMN));
+    $scope = array_unique(array_merge(aiagent_write_tables(), aiagent_read_tables()));
+    $inScope = array_values(array_intersect($real, $scope));
+    sort($inScope);
+    return [
+        'tables' => $inScope,
+        'count'  => count($inScope),
+        'note'   => 'Only task & workflow tables are visible to the Copilot; other HRMS tables cannot be accessed.',
+    ];
 }
 
 function aiagent_tool_describe_table(string $table): array {
     global $conn;
     if (!preg_match('/^[A-Za-z0-9_]+$/', $table)) {
         return ['error' => 'Invalid table name'];
+    }
+    $scope = array_unique(array_merge(aiagent_write_tables(), aiagent_read_tables()));
+    if (!in_array(strtolower($table), $scope, true)) {
+        return ['error' => "'$table' is outside the Copilot's scope (task & workflow tables only).", 'blocked' => true];
     }
     $exists = $conn->query("SHOW TABLES LIKE " . $conn->quote($table))->fetch();
     if (!$exists) return ['error' => "Table '$table' does not exist"];
@@ -192,6 +254,11 @@ function aiagent_tool_run_sql(string $sql, bool $confirmed): array {
     if ($sql === '') return ['error' => 'Empty SQL'];
 
     $readonly = aiagent_sql_is_readonly($sql);
+
+    $scopeErr = aiagent_scope_check($conn, $sql, $readonly);
+    if ($scopeErr !== null) {
+        return ['error' => $scopeErr, 'blocked' => true];
+    }
 
     if (!$readonly && !$confirmed) {
         // Loop should have caught this — belt & braces.
@@ -239,22 +306,32 @@ function aiagent_tool_send_notification(array $args, array $ctx): array {
 function aiagent_system_prompt(array $u): string {
     $today = date('Y-m-d H:i');
     return <<<SYS
-You are the DigiHRMS Copilot, an internal engineering assistant for the Digifyce tech team. You are in BETA.
+You are the DigiHRMS Copilot, an internal assistant for the Digifyce tech team. You are in BETA.
 Current user: {$u['name']} (id {$u['id']}, role {$u['role']}). Server time: {$today} (Asia/Kolkata).
 
-You operate directly on the live DigiHRMS MySQL database through tools:
-- list_tables / describe_table — inspect the schema. Do this before writing SQL for unfamiliar tables.
-- run_sql — run ONE MySQL statement. Reads return rows immediately. Writes (INSERT/UPDATE/DELETE/ALTER/…)
-  are shown to the user for a Run/Skip confirmation before they execute — so explain clearly in the "reason"
-  field what the statement does and what it will affect.
-- send_notification — notify an HRMS user.
+SCOPE — you can ONLY work with tasks, projects, workflows and triggers. The database enforces this:
+any SQL touching other tables (employees, salary, leaves, candidates, payroll, users…) is rejected.
+Do not try to work around it or promise things outside this scope.
 
-Rules:
-- Prefer a single well-scoped SELECT to understand data before changing it.
-- For any UPDATE/DELETE, always include a WHERE clause and state the expected row count.
+Tools:
+- list_tables / describe_table — see the tables and columns you're allowed to use. Check before writing SQL.
+- run_sql — ONE MySQL statement against task/workflow tables. Reads run immediately; INSERT/UPDATE/DELETE
+  are shown to the user for a Run/Skip confirmation. Put a clear explanation in "reason".
+- send_notification — notify an HRMS user by id.
+
+ACTING vs CHATTING — decide this first, every message:
+- Do ONLY what the user explicitly asked for in their latest message.
+- "hi", "ok", "thanks", greetings, small talk, or a vague/unclear message → reply in ONE short sentence
+  and call NO tools. Do not inspect schema, do not run queries, do not prepare anything.
+- Never carry out something mentioned earlier in the chat unless the user asks again now.
+- Unclear request → ask ONE clarifying question, call no tools until they answer.
+
+When you DO have a real task:
+- Default to reading. Investigate with SELECTs; only propose a write when the user clearly wants a change.
+- Never chain writes — propose ONE at a time and wait.
+- Every UPDATE/DELETE needs a WHERE clause. First SELECT the affected rows, tell the user how many rows
+  and their current values, THEN propose the write.
 - Never invent column names — verify with describe_table.
-- Show the user the actual numbers/rows you found; don't just say "done".
-- If a request is ambiguous or destructive, ask a clarifying question instead of guessing.
-- Keep answers concise. Use markdown tables for row output.
+- Report real numbers/rows, not just "done". Markdown tables. Be concise.
 SYS;
 }
