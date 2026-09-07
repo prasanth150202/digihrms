@@ -10,6 +10,17 @@ $role      = $u['role'];
 $is_admin  = has_role('SUPER_ADMIN','DEPT_MANAGER');
 $is_tl     = has_role('TEAM_LEAD');
 
+// Non-admin accounts explicitly flagged to see every team's learning
+// (column added by migrate_learning_viewer.php). Read-only — no delete,
+// no Stats tab; just the "All Learners" view.
+$can_view_all_learning = false;
+try {
+    $cval = $conn->prepare("SELECT can_view_all_learning FROM users WHERE id=? LIMIT 1");
+    $cval->execute([$uid]);
+    $can_view_all_learning = (bool)$cval->fetchColumn();
+} catch (PDOException $e) { $can_view_all_learning = false; }
+$view_all = $is_admin || $can_view_all_learning;
+
 // Get own employee ID
 $empR = $conn->prepare("SELECT e.id FROM employees e JOIN users u ON u.email=e.email WHERE u.id=? LIMIT 1");
 $empR->execute([$uid]);
@@ -481,10 +492,14 @@ $team_learning = [];
 $team_pending_reviews = [];
 $team_logs = [];
 $tl_dept_missing = false;
-if ($is_tl || $is_admin) {
-    // Find team members (users in same dept whose TL is $uid, or all for admin)
-    if ($is_admin) {
-        $teamUserIds = $conn->query("SELECT id FROM users WHERE role='EMPLOYEE'")->fetchAll(PDO::FETCH_COLUMN);
+if ($is_tl || $view_all) {
+    // Find team members (users in same dept whose TL is $uid, or all for admin / all-learning viewer)
+    if ($view_all) {
+        // Everyone with an employee record — not just role='EMPLOYEE', so
+        // Team Leads' / Managers' own learning shows up here too.
+        $teamUserIds = $conn->query("
+            SELECT u.id FROM users u JOIN employees e ON e.email = u.email
+        ")->fetchAll(PDO::FETCH_COLUMN);
     } else {
         $tlDept = $conn->prepare("
             SELECT er.dept_id FROM employee_roles er
@@ -798,7 +813,7 @@ include 'header.php';
 </div>
 <?php endif; ?>
 
-<?php if (!$is_admin && !$is_tl): ?>
+<?php if (!$view_all && !$is_tl): ?>
 <!-- ══════════════════════════════════════════════════════ EMPLOYEE VIEW -->
 
 <!-- Stats row -->
@@ -947,7 +962,7 @@ include 'header.php';
 <!-- Tabs -->
 <div class="learn-tabs">
     <button class="learn-tab active" onclick="showTab('team',this)">
-        <i class="bi bi-people me-1"></i><?= $is_admin ? 'All Learners' : 'My Team' ?>
+        <i class="bi bi-people me-1"></i><?= $view_all ? 'All Learners' : 'My Team' ?>
     </button>
     <?php if ($team_pending_reviews): ?>
     <button class="learn-tab" onclick="showTab('reviews',this)" style="position:relative;">
@@ -986,7 +1001,7 @@ $badge_count   = $is_admin ? count($all_badge_awards) : count(array_filter($team
 
 <div class="learn-card">
     <div class="learn-card-body">
-        <h6 class="learn-card-title mb-3"><i class="bi bi-journal-check me-2"></i><?= $is_admin ? 'All Learning Tasks' : 'Team Learning Tasks' ?></h6>
+        <h6 class="learn-card-title mb-3"><i class="bi bi-journal-check me-2"></i><?= $view_all ? 'All Learning Tasks' : 'Team Learning Tasks' ?></h6>
         <?php if (!$team_learning): ?>
         <div class="learn-empty"><i class="bi bi-mortarboard"></i><p>No learning tasks found.</p></div>
         <?php else: ?>
@@ -1086,14 +1101,16 @@ $badge_count   = $is_admin ? count($all_badge_awards) : count(array_filter($team
                 </td>
                 <td style="padding:12px 14px;font-size:12px;color:var(--text-muted);max-width:240px;"><?= $log['notes'] ? nl2br(sanitize($log['notes'])) : '—' ?></td>
                 <td style="padding:12px 14px;">
+                    <?php if ($is_tl || $is_admin): ?>
                     <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2" style="font-size:11px;" data-bs-toggle="modal" data-bs-target="#tl-del-log-<?= (int)$log['id'] ?>" title="Delete this log entry"><i class="bi bi-trash"></i></button>
+                    <?php endif; ?>
                 </td>
             </tr>
             <?php endforeach; ?>
             </tbody>
         </table>
         </div>
-        <?php foreach ($team_logs as $log): ?>
+        <?php foreach ($team_logs as $log): if (!($is_tl || $is_admin)) continue; ?>
             <div class="modal fade" id="tl-del-log-<?= (int)$log['id'] ?>" tabindex="-1">
               <div class="modal-dialog modal-dialog-centered">
                 <form method="POST" class="modal-content border-0 shadow-lg" style="border-radius:18px;">
