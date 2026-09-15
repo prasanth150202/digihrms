@@ -101,6 +101,9 @@ function _render_my_learning_log_row(array $log, bool $log_status_ready, bool $l
                 <?php if ($log_progress_ready && $status === 'pursuing'): ?>
                 <div class="course-progress-track mt-2" style="max-width:140px;"><div class="course-progress-fill" style="width:<?= (int)$log['progress_pct'] ?>%;"></div></div>
                 <div class="course-progress-label"><?= (int)$log['progress_pct'] ?>% complete</div>
+                <?php if (!empty($log['last_updated_at'])): ?>
+                <div class="small text-muted mt-1">Last updated <?= date('d M Y, h:i A', strtotime($log['last_updated_at'])) ?></div>
+                <?php endif; ?>
                 <?php endif; ?>
                 <?php if ($log_progress_ready && $status === 'completed' && !empty($log['proof_url'])): ?>
                 <a href="<?= sanitize($log['proof_url']) ?>" target="_blank" rel="noopener noreferrer" class="course-proof mt-2"><i class="bi bi-patch-check-fill" style="color:#16a34a;"></i>Proof of completion</a>
@@ -224,6 +227,58 @@ function _render_my_learning_log_modals(array $log, bool $log_status_ready, bool
             <div class="modal-footer border-0 px-4 pb-4 pt-2">
                 <button type="button" class="btn btn-light btn-sm" data-bs-dismiss="modal">Cancel</button>
                 <button type="submit" class="btn btn-danger btn-sm">Delete</button>
+            </div>
+        </form>
+      </div>
+    </div>
+    <?php
+}
+
+// Renders the "Export learning log" modal — pick a month or a custom date
+// range and download a CSV. $scope is 'mine' or 'team' (team requires TL/Admin).
+function _render_export_log_modal(string $modalId, string $scope): void {
+    ?>
+    <div class="modal fade" id="<?= $modalId ?>" tabindex="-1">
+      <div class="modal-dialog modal-dialog-centered">
+        <form method="GET" action="learning.php" class="modal-content border-0 shadow-lg" style="border-radius:18px;">
+            <input type="hidden" name="export_logs" value="1">
+            <input type="hidden" name="scope" value="<?= sanitize($scope) ?>">
+            <div class="modal-header border-0 pb-0 pt-4 px-4">
+                <h5 class="modal-title fw-bold mb-0">Export Learning Log</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body px-4 pt-3 pb-2">
+                <div class="mb-3">
+                    <div class="form-check">
+                        <input class="form-check-input" type="radio" name="range" id="<?= $modalId ?>-month" value="month" checked
+                            onchange="document.getElementById('<?= $modalId ?>-month-wrap').style.display='';document.getElementById('<?= $modalId ?>-custom-wrap').style.display='none';">
+                        <label class="form-check-label small" for="<?= $modalId ?>-month">Monthly</label>
+                    </div>
+                    <div class="form-check">
+                        <input class="form-check-input" type="radio" name="range" id="<?= $modalId ?>-custom" value="custom"
+                            onchange="document.getElementById('<?= $modalId ?>-month-wrap').style.display='none';document.getElementById('<?= $modalId ?>-custom-wrap').style.display='';">
+                        <label class="form-check-label small" for="<?= $modalId ?>-custom">Custom date range</label>
+                    </div>
+                </div>
+                <div id="<?= $modalId ?>-month-wrap">
+                    <label class="form-label small fw-semibold">Month</label>
+                    <input type="month" name="month" class="form-control" value="<?= date('Y-m') ?>" max="<?= date('Y-m') ?>">
+                </div>
+                <div id="<?= $modalId ?>-custom-wrap" style="display:none;" class="row g-2">
+                    <div class="col-6">
+                        <label class="form-label small fw-semibold">From</label>
+                        <input type="date" name="start" class="form-control" value="<?= date('Y-m-01') ?>" max="<?= date('Y-m-d') ?>">
+                    </div>
+                    <div class="col-6">
+                        <label class="form-label small fw-semibold">To</label>
+                        <input type="date" name="end" class="form-control" value="<?= date('Y-m-d') ?>" max="<?= date('Y-m-d') ?>">
+                    </div>
+                </div>
+                <p class="small text-muted mt-3 mb-0">Includes any course started, completed, or updated in the selected period.</p>
+            </div>
+            <div class="modal-footer border-0 px-4 pb-4 pt-2">
+                <button type="button" class="btn btn-light btn-sm" data-bs-dismiss="modal">Cancel</button>
+                <button type="submit" class="btn btn-primary btn-sm"><i class="bi bi-download me-1"></i>Export CSV</button>
             </div>
         </form>
       </div>
@@ -472,7 +527,8 @@ if ($tables_ready && $my_emp_id) {
 $my_logs = [];
 if ($log_table_ready && $my_emp_id) {
     try {
-        $ml = $conn->prepare("SELECT * FROM hrms_learning_logs WHERE employee_id=? ORDER BY learned_on DESC, created_at DESC LIMIT 50");
+        $lastUpdSel = $log_progress_ready ? ", (SELECT MAX(created_at) FROM hrms_learning_log_updates WHERE log_id = hl.id) as last_updated_at" : "";
+        $ml = $conn->prepare("SELECT hl.*{$lastUpdSel} FROM hrms_learning_logs hl WHERE hl.employee_id=? ORDER BY hl.learned_on DESC, hl.created_at DESC LIMIT 50");
         $ml->execute([$my_emp_id]);
         $my_logs = $ml->fetchAll();
 
@@ -562,8 +618,9 @@ if ($is_tl || $view_all) {
     if ($teamUserIds && $log_table_ready) {
         $in = implode(',', array_map('intval', $teamUserIds));
         try {
+            $lastUpdSel = $log_progress_ready ? ", (SELECT MAX(created_at) FROM hrms_learning_log_updates WHERE log_id = hl.id) as last_updated_at" : "";
             $tlog = $conn->query("
-                SELECT hl.*, e.name as emp_name
+                SELECT hl.*, e.name as emp_name{$lastUpdSel}
                 FROM hrms_learning_logs hl
                 JOIN employees e ON e.id = hl.employee_id
                 JOIN users u ON u.email = e.email
@@ -574,6 +631,86 @@ if ($is_tl || $view_all) {
             $team_logs = $tlog->fetchAll();
         } catch (PDOException $e) {}
     }
+}
+
+// ── Export learning log (CSV) ───────────────────────────────────────────────
+if (isset($_GET['export_logs']) && $log_table_ready) {
+    $canExportTeam = $is_tl || $view_all;
+    $scope = (($_GET['scope'] ?? 'mine') === 'team' && $canExportTeam) ? 'team' : 'mine';
+
+    if (($_GET['range'] ?? 'month') === 'custom') {
+        $start = $_GET['start'] ?? date('Y-m-01');
+        $end   = $_GET['end'] ?? date('Y-m-d');
+    } else {
+        $month = preg_match('/^\d{4}-\d{2}$/', $_GET['month'] ?? '') ? $_GET['month'] : date('Y-m');
+        $start = $month . '-01';
+        $end   = date('Y-m-t', strtotime($start));
+    }
+    $startTs = strtotime($start);
+    $endTs   = strtotime($end);
+    if (!$startTs || !$endTs || $startTs > $endTs) {
+        $start = date('Y-m-01');
+        $end   = date('Y-m-t');
+    }
+
+    $dateClause = "(hl.learned_on BETWEEN ? AND ?)";
+    $params = [$start, $end];
+    if ($log_status_ready) {
+        $dateClause .= " OR (hl.completed_on BETWEEN ? AND ?)";
+        $params[] = $start; $params[] = $end;
+    }
+    if ($log_progress_ready) {
+        $dateClause .= " OR EXISTS (SELECT 1 FROM hrms_learning_log_updates hlu WHERE hlu.log_id = hl.id AND DATE(hlu.created_at) BETWEEN ? AND ?)";
+        $params[] = $start; $params[] = $end;
+    }
+    $lastUpdSelect = $log_progress_ready
+        ? "(SELECT MAX(created_at) FROM hrms_learning_log_updates WHERE log_id = hl.id) as last_updated_at"
+        : "NULL as last_updated_at";
+
+    $exportRows  = [];
+    $myOwnName   = $u['name'] ?? '';
+    if ($scope === 'team' && !empty($teamUserIds)) {
+        $in = implode(',', array_map('intval', $teamUserIds));
+        $stmt = $conn->prepare("
+            SELECT hl.*, e.name as emp_name, {$lastUpdSelect}
+            FROM hrms_learning_logs hl
+            JOIN employees e ON e.id = hl.employee_id
+            JOIN users u ON u.email = e.email
+            WHERE u.id IN ({$in}) AND ({$dateClause})
+            ORDER BY e.name ASC, hl.learned_on ASC
+        ");
+        $stmt->execute($params);
+        $exportRows = $stmt->fetchAll();
+    } elseif ($scope === 'mine' && $my_emp_id) {
+        $stmt = $conn->prepare("
+            SELECT hl.*, {$lastUpdSelect}
+            FROM hrms_learning_logs hl
+            WHERE hl.employee_id = ? AND ({$dateClause})
+            ORDER BY hl.learned_on ASC
+        ");
+        $stmt->execute(array_merge([$my_emp_id], $params));
+        $exportRows = $stmt->fetchAll();
+    }
+
+    header('Content-Type: text/csv; charset=utf-8');
+    header('Content-Disposition: attachment; filename="learning_log_' . $start . '_to_' . $end . '.csv"');
+    $out = fopen('php://output', 'w');
+    fputcsv($out, ['Employee', 'Course / Topic', 'Status', 'Started On', 'Completed On', 'Progress %', 'Last Updated', 'Notes']);
+    foreach ($exportRows as $r) {
+        $rstatus = $log_status_ready ? ($r['status'] ?? 'completed') : 'completed';
+        fputcsv($out, [
+            $r['emp_name'] ?? $myOwnName,
+            $r['title'],
+            ucfirst($rstatus),
+            $r['learned_on'] ? date('Y-m-d', strtotime($r['learned_on'])) : '',
+            !empty($r['completed_on']) ? date('Y-m-d', strtotime($r['completed_on'])) : '',
+            $log_progress_ready ? (int)$r['progress_pct'] : ($rstatus === 'completed' ? 100 : ''),
+            !empty($r['last_updated_at']) ? date('Y-m-d H:i', strtotime($r['last_updated_at'])) : '',
+            $r['notes'] ?? '',
+        ]);
+    }
+    fclose($out);
+    exit;
 }
 
 // ── Admin: all badges awarded + completion stats ──────────────────────────
@@ -929,7 +1066,10 @@ include 'header.php';
 <?php if ($log_table_ready): ?>
 <div class="learn-card mt-4">
     <div class="learn-card-body">
-        <h6 class="learn-card-title mb-3"><i class="bi bi-pencil-square me-2"></i>My Learning Log</h6>
+        <div class="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-2">
+            <h6 class="learn-card-title mb-0"><i class="bi bi-pencil-square me-2"></i>My Learning Log</h6>
+            <button type="button" class="btn btn-sm btn-outline-secondary" style="font-size:11px;" data-bs-toggle="modal" data-bs-target="#exportMyLogEmp"><i class="bi bi-download me-1"></i>Export</button>
+        </div>
         <?php if (!$my_logs): ?>
         <div class="learn-empty">
             <i class="bi bi-journal-plus"></i>
@@ -952,6 +1092,7 @@ include 'header.php';
         </div>
         <?php foreach ($my_logs as $log): _render_my_learning_log_modals($log, $log_status_ready, $log_progress_ready); endforeach; ?>
         <?php endif; ?>
+        <?php _render_export_log_modal('exportMyLogEmp', 'mine'); ?>
     </div>
 </div>
 <?php endif; ?>
@@ -1059,7 +1200,10 @@ $badge_count   = $is_admin ? count($all_badge_awards) : count(array_filter($team
 <?php if ($log_table_ready): ?>
 <div class="learn-card mt-4">
     <div class="learn-card-body">
-        <h6 class="learn-card-title mb-3"><i class="bi bi-pencil-square me-2"></i>Team Learning Log</h6>
+        <div class="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-2">
+            <h6 class="learn-card-title mb-0"><i class="bi bi-pencil-square me-2"></i>Team Learning Log</h6>
+            <button type="button" class="btn btn-sm btn-outline-secondary" style="font-size:11px;" data-bs-toggle="modal" data-bs-target="#exportTeamLog"><i class="bi bi-download me-1"></i>Export</button>
+        </div>
         <?php if (!$team_logs): ?>
         <div class="learn-empty"><i class="bi bi-journal-plus"></i><p>Nobody's logged anything yet.</p></div>
         <?php else: ?>
@@ -1085,6 +1229,9 @@ $badge_count   = $is_admin ? count($all_badge_awards) : count(array_filter($team
                         <?php if ($tstatus === 'pursuing'): ?>
                         <span class="badge" style="background:#fef9c3;color:#854d0e;">🟡 Pursuing</span>
                         <div class="small text-muted mt-1">Started <?= date('d M Y', strtotime($log['learned_on'])) ?><?= isset($log['progress_pct']) ? ' — ' . (int)$log['progress_pct'] . '%' : '' ?></div>
+                        <?php if (!empty($log['last_updated_at'])): ?>
+                        <div class="small text-muted">Last updated <?= date('d M Y, h:i A', strtotime($log['last_updated_at'])) ?></div>
+                        <?php endif; ?>
                         <?php elseif ($tstatus === 'dropped'): ?>
                         <span class="badge" style="background:#f1f5f9;color:#64748b;">⛔ Dropped</span>
                         <div class="small text-muted mt-1">Started <?= date('d M Y', strtotime($log['learned_on'])) ?></div>
@@ -1133,6 +1280,7 @@ $badge_count   = $is_admin ? count($all_badge_awards) : count(array_filter($team
             </div>
         <?php endforeach; ?>
         <?php endif; ?>
+        <?php _render_export_log_modal('exportTeamLog', 'team'); ?>
     </div>
 </div>
 <?php endif; ?>
@@ -1257,7 +1405,10 @@ $badge_count   = $is_admin ? count($all_badge_awards) : count(array_filter($team
     <?php if ($log_table_ready): ?>
     <div class="learn-card mt-4">
         <div class="learn-card-body">
-            <h6 class="learn-card-title mb-3"><i class="bi bi-pencil-square me-2"></i>My Learning Log</h6>
+            <div class="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-2">
+                <h6 class="learn-card-title mb-0"><i class="bi bi-pencil-square me-2"></i>My Learning Log</h6>
+                <button type="button" class="btn btn-sm btn-outline-secondary" style="font-size:11px;" data-bs-toggle="modal" data-bs-target="#exportMyLogTl"><i class="bi bi-download me-1"></i>Export</button>
+            </div>
             <?php if (!$my_logs): ?>
             <div class="learn-empty">
                 <i class="bi bi-journal-plus"></i>
@@ -1280,6 +1431,7 @@ $badge_count   = $is_admin ? count($all_badge_awards) : count(array_filter($team
             </div>
             <?php foreach ($my_logs as $log): _render_my_learning_log_modals($log, $log_status_ready, $log_progress_ready); endforeach; ?>
             <?php endif; ?>
+            <?php _render_export_log_modal('exportMyLogTl', 'mine'); ?>
         </div>
     </div>
     <?php endif; ?>
