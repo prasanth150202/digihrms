@@ -57,6 +57,41 @@ function _learning_log_history_note(PDO $conn, int $logId, int $pct, string $sta
          ->execute([$logId, $pct, $status, $note !== '' ? $note : null]);
 }
 
+// Renders a course's progress history as a compact table (Date | Progress | Note),
+// newest first, inside a collapsible <details>. Shared by every place that shows history.
+function _render_learning_history_table(array $history): void {
+    ?>
+    <details class="course-history mt-1">
+        <summary class="small text-muted" style="cursor:pointer;">History · <?= count($history) ?> update<?= count($history) === 1 ? '' : 's' ?></summary>
+        <div class="table-responsive mt-2">
+        <table class="table table-sm mb-0" style="font-size:11.5px;">
+            <thead>
+                <tr>
+                    <th style="font-weight:700;color:var(--text-muted);padding:4px 8px;">Date</th>
+                    <th style="font-weight:700;color:var(--text-muted);padding:4px 8px;">Progress</th>
+                    <th style="font-weight:700;color:var(--text-muted);padding:4px 8px;">Note</th>
+                </tr>
+            </thead>
+            <tbody>
+            <?php foreach (array_reverse($history) as $h): ?>
+                <tr>
+                    <td style="padding:4px 8px;white-space:nowrap;font-weight:600;color:var(--text-primary);"><?= date('d M Y, h:i A', strtotime($h['created_at'])) ?></td>
+                    <td style="padding:4px 8px;white-space:nowrap;">
+                        <?php if ($h['status'] === 'completed'): ?>Completed (100%)
+                        <?php elseif ($h['status'] === 'dropped'): ?>Dropped at <?= (int)$h['progress_pct'] ?>%
+                        <?php else: ?><?= (int)$h['progress_pct'] ?>%
+                        <?php endif; ?>
+                    </td>
+                    <td style="padding:4px 8px;color:var(--text-muted);"><?= $h['note'] ? sanitize($h['note']) : '—' ?></td>
+                </tr>
+            <?php endforeach; ?>
+            </tbody>
+        </table>
+        </div>
+    </details>
+    <?php
+}
+
 // Renders one "my learning log" table row (title, status, progress, actions, history).
 // Shared by the employee view and the TL/Admin "My Learning" tab.
 function _render_my_learning_log_row(array $log, bool $log_status_ready, bool $log_progress_ready): void {
@@ -68,23 +103,7 @@ function _render_my_learning_log_row(array $log, bool $log_status_ready, bool $l
             <?php if ($log['notes']): ?>
             <div class="small text-muted mt-1"><?= nl2br(sanitize($log['notes'])) ?></div>
             <?php endif; ?>
-            <?php if ($log_progress_ready && !empty($log['history'])): ?>
-            <details class="course-history mt-1">
-                <summary class="small text-muted" style="cursor:pointer;">History · <?= count($log['history']) ?> update<?= count($log['history']) === 1 ? '' : 's' ?></summary>
-                <div class="timeline">
-                <?php foreach (array_reverse($log['history']) as $h): ?>
-                    <div class="timeline-item">
-                        <span class="t-date"><?= date('d M Y, h:i A', strtotime($h['created_at'])) ?></span> —
-                        <?php if ($h['status'] === 'completed'): ?>Completed (100%)
-                        <?php elseif ($h['status'] === 'dropped'): ?>Dropped at <?= (int)$h['progress_pct'] ?>%
-                        <?php else: ?><?= (int)$h['progress_pct'] ?>%
-                        <?php endif; ?>
-                        <?php if ($h['note']): ?> — <?= sanitize($h['note']) ?><?php endif; ?>
-                    </div>
-                <?php endforeach; ?>
-                </div>
-            </details>
-            <?php endif; ?>
+            <?php if ($log_progress_ready && !empty($log['history'])): _render_learning_history_table($log['history']); endif; ?>
         </td>
         <td style="padding:12px 14px;">
             <?php if ($log_status_ready): ?>
@@ -856,16 +875,14 @@ include 'header.php';
 .course-actions .btn { font-size:11px;border-radius:8px;padding:5px 11px;white-space:nowrap; }
 .course-proof { font-size:12px;font-weight:600;display:inline-flex;align-items:center;gap:4px; }
 
-/* ── History timeline ───────────────────────────────────────────────── */
+/* ── History table ──────────────────────────────────────────────────── */
 .course-history summary { font-size:11.5px;color:var(--text-muted);cursor:pointer;font-weight:600;list-style:none;display:inline-flex;align-items:center;gap:4px;margin-top:10px; }
 .course-history summary::-webkit-details-marker { display:none; }
 .course-history summary::before { content:'▸';transition:transform .15s; }
 .course-history[open] summary::before { transform:rotate(90deg); }
-.timeline { margin-top:10px;padding-left:14px;border-left:2px solid var(--card-bdr); }
-.timeline-item { position:relative;padding:0 0 12px 16px;font-size:12px;color:var(--text-muted); }
-.timeline-item:last-child { padding-bottom:0; }
-.timeline-item::before { content:'';position:absolute;left:-19px;top:4px;width:8px;height:8px;border-radius:50%;background:#7c3aed; }
-.timeline-item .t-date { font-weight:700;color:var(--text-primary); }
+.course-history table { border-top:1px solid var(--card-bdr); }
+.course-history thead tr { border-bottom:1px solid var(--card-bdr); }
+.course-history tbody tr:not(:last-child) { border-bottom:1px solid var(--card-bdr); }
 
 /* ── Empty state ────────────────────────────────────────────────────── */
 .learn-empty { text-align:center;padding:36px 20px;color:var(--text-muted); }
@@ -1249,23 +1266,7 @@ $badge_count   = $is_admin ? count($all_badge_awards) : count(array_filter($team
                 <td style="padding:12px 14px;font-size:13px;font-weight:600;"><?= sanitize($log['emp_name']) ?></td>
                 <td style="padding:12px 14px;font-size:13px;">
                     <?= sanitize($log['title']) ?>
-                    <?php if ($log_progress_ready && !empty($log['history'])): ?>
-                    <details class="course-history mt-1">
-                        <summary class="small text-muted" style="cursor:pointer;">History · <?= count($log['history']) ?> update<?= count($log['history']) === 1 ? '' : 's' ?></summary>
-                        <div class="timeline">
-                        <?php foreach (array_reverse($log['history']) as $h): ?>
-                            <div class="timeline-item">
-                                <span class="t-date"><?= date('d M Y, h:i A', strtotime($h['created_at'])) ?></span> —
-                                <?php if ($h['status'] === 'completed'): ?>Completed (100%)
-                                <?php elseif ($h['status'] === 'dropped'): ?>Dropped at <?= (int)$h['progress_pct'] ?>%
-                                <?php else: ?><?= (int)$h['progress_pct'] ?>%
-                                <?php endif; ?>
-                                <?php if ($h['note']): ?> — <?= sanitize($h['note']) ?><?php endif; ?>
-                            </div>
-                        <?php endforeach; ?>
-                        </div>
-                    </details>
-                    <?php endif; ?>
+                    <?php if ($log_progress_ready && !empty($log['history'])): _render_learning_history_table($log['history']); endif; ?>
                 </td>
                 <td style="padding:12px 14px;">
                     <?php if ($log_status_ready): ?>
