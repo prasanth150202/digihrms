@@ -629,6 +629,15 @@ if ($is_tl || $view_all) {
                 LIMIT 50
             ");
             $team_logs = $tlog->fetchAll();
+
+            if ($log_progress_ready && $team_logs) {
+                $logIds = implode(',', array_map('intval', array_column($team_logs, 'id')));
+                $tHist = $conn->query("SELECT * FROM hrms_learning_log_updates WHERE log_id IN ({$logIds}) ORDER BY created_at ASC")->fetchAll();
+                $tHistByLog = [];
+                foreach ($tHist as $h) { $tHistByLog[$h['log_id']][] = $h; }
+                foreach ($team_logs as &$log) { $log['history'] = $tHistByLog[$log['id']] ?? []; }
+                unset($log);
+            }
         } catch (PDOException $e) {}
     }
 }
@@ -692,12 +701,27 @@ if (isset($_GET['export_logs']) && $log_table_ready) {
         $exportRows = $stmt->fetchAll();
     }
 
+    $exportHistByLog = [];
+    if ($log_progress_ready && $exportRows) {
+        $logIds = implode(',', array_map('intval', array_column($exportRows, 'id')));
+        $h = $conn->query("SELECT * FROM hrms_learning_log_updates WHERE log_id IN ({$logIds}) ORDER BY created_at ASC")->fetchAll();
+        foreach ($h as $row) { $exportHistByLog[$row['log_id']][] = $row; }
+    }
+
     header('Content-Type: text/csv; charset=utf-8');
     header('Content-Disposition: attachment; filename="learning_log_' . $start . '_to_' . $end . '.csv"');
     $out = fopen('php://output', 'w');
-    fputcsv($out, ['Employee', 'Course / Topic', 'Status', 'Started On', 'Completed On', 'Progress %', 'Last Updated', 'Notes']);
+    fputcsv($out, ['Employee', 'Course / Topic', 'Status', 'Started On', 'Completed On', 'Progress %', 'Last Updated', 'Progress History', 'Notes']);
     foreach ($exportRows as $r) {
         $rstatus = $log_status_ready ? ($r['status'] ?? 'completed') : 'completed';
+        $historyStr = '';
+        if (!empty($exportHistByLog[$r['id']])) {
+            $parts = [];
+            foreach ($exportHistByLog[$r['id']] as $h) {
+                $parts[] = date('d M Y H:i', strtotime($h['created_at'])) . ': ' . (int)$h['progress_pct'] . '% (' . $h['status'] . ')';
+            }
+            $historyStr = implode(' | ', $parts);
+        }
         fputcsv($out, [
             $r['emp_name'] ?? $myOwnName,
             $r['title'],
@@ -706,6 +730,7 @@ if (isset($_GET['export_logs']) && $log_table_ready) {
             !empty($r['completed_on']) ? date('Y-m-d', strtotime($r['completed_on'])) : '',
             $log_progress_ready ? (int)$r['progress_pct'] : ($rstatus === 'completed' ? 100 : ''),
             !empty($r['last_updated_at']) ? date('Y-m-d H:i', strtotime($r['last_updated_at'])) : '',
+            $historyStr,
             $r['notes'] ?? '',
         ]);
     }
@@ -1222,7 +1247,26 @@ $badge_count   = $is_admin ? count($all_badge_awards) : count(array_filter($team
             <?php foreach ($team_logs as $log): ?>
             <tr>
                 <td style="padding:12px 14px;font-size:13px;font-weight:600;"><?= sanitize($log['emp_name']) ?></td>
-                <td style="padding:12px 14px;font-size:13px;"><?= sanitize($log['title']) ?></td>
+                <td style="padding:12px 14px;font-size:13px;">
+                    <?= sanitize($log['title']) ?>
+                    <?php if ($log_progress_ready && !empty($log['history'])): ?>
+                    <details class="course-history mt-1">
+                        <summary class="small text-muted" style="cursor:pointer;">History · <?= count($log['history']) ?> update<?= count($log['history']) === 1 ? '' : 's' ?></summary>
+                        <div class="timeline">
+                        <?php foreach (array_reverse($log['history']) as $h): ?>
+                            <div class="timeline-item">
+                                <span class="t-date"><?= date('d M Y, h:i A', strtotime($h['created_at'])) ?></span> —
+                                <?php if ($h['status'] === 'completed'): ?>Completed (100%)
+                                <?php elseif ($h['status'] === 'dropped'): ?>Dropped at <?= (int)$h['progress_pct'] ?>%
+                                <?php else: ?><?= (int)$h['progress_pct'] ?>%
+                                <?php endif; ?>
+                                <?php if ($h['note']): ?> — <?= sanitize($h['note']) ?><?php endif; ?>
+                            </div>
+                        <?php endforeach; ?>
+                        </div>
+                    </details>
+                    <?php endif; ?>
+                </td>
                 <td style="padding:12px 14px;">
                     <?php if ($log_status_ready): ?>
                         <?php $tstatus = $log['status'] ?? 'completed'; ?>
