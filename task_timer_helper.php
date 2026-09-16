@@ -200,16 +200,30 @@ function close_stale_task_timers($conn, $user_id, $max_hours = 12) {
  *
  * @param array $rows each ['task_id','started_at','ended_at']
  */
-function summarize_task_time(array $rows, string $from, string $to, int $day_cap_h = 16): array {
+function summarize_task_time(array $rows, string $from, string $to, int $day_cap_h = 16, int $max_session_h = 12): array {
     $range_start = strtotime($from . ' 00:00:00');
     $range_end   = strtotime($to   . ' 00:00:00 +1 day');
     $cap         = $day_cap_h * 3600;
+    $max_session = $max_session_h * 3600;
 
-    $days = [];
+    $days    = [];
+    $suspect = ['count' => 0, 'seconds' => 0, 'tasks' => []];
     foreach ($rows as $r) {
         $tid = (int)$r['task_id'];
-        $s   = max(strtotime($r['started_at']), $range_start);
-        $e   = min(strtotime($r['ended_at']),   $range_end);
+
+        // A session longer than the abandonment threshold is a card left in In Progress,
+        // not a day's work. Clamping it to a per-day ceiling would launder it into a
+        // believable 16h; excluding it and saying so keeps the totals honest.
+        $full = strtotime($r['ended_at']) - strtotime($r['started_at']);
+        if ($full > $max_session) {
+            $suspect['count']++;
+            $suspect['seconds'] += $full;
+            $suspect['tasks'][$tid] = ($suspect['tasks'][$tid] ?? 0) + $full;
+            continue;
+        }
+
+        $s = max(strtotime($r['started_at']), $range_start);
+        $e = min(strtotime($r['ended_at']),   $range_end);
         if ($e <= $s) continue;
 
         $cur = $s;
@@ -261,7 +275,9 @@ function summarize_task_time(array $rows, string $from, string $to, int $day_cap
 
     ksort($by_day);
     arsort($by_task);
-    return ['days' => $by_day, 'tasks' => $by_task, 'tracked' => $total_tracked, 'covered' => $total_covered];
+    arsort($suspect['tasks']);
+    return ['days' => $by_day, 'tasks' => $by_task, 'tracked' => $total_tracked,
+            'covered' => $total_covered, 'suspect' => $suspect];
 }
 
 /** Seconds as "6h 12m" (or "—" for nothing). */

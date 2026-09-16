@@ -21,6 +21,31 @@ if (!in_array($role, ['SUPER_ADMIN','HR_ADMIN','DEPT_MANAGER','TEAM_LEAD'], true
     exit('Not allowed.');
 }
 
+// Alias column: maps the name TeamLogger sends to an HRMS user, for people whose punch
+// rows carry no employee code or email. Additive, so re-running is harmless.
+try { $conn->exec("ALTER TABLE users ADD COLUMN tl_name VARCHAR(190) NULL DEFAULT NULL"); } catch (PDOException $e) {}
+
+// ── Linking (the only writes on this page) ────────────────
+$flash_msg = '';
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'link') {
+    $target   = (int)($_POST['hrms_id'] ?? 0);
+    $tl_label = trim($_POST['tl_name'] ?? '');
+    if ($target && $tl_label !== '') {
+        // One TeamLogger name can only belong to one person.
+        $conn->prepare("UPDATE users SET tl_name=NULL WHERE LOWER(TRIM(tl_name))=?")
+             ->execute([mb_strtolower($tl_label)]);
+        $conn->prepare("UPDATE users SET tl_name=? WHERE id=?")->execute([$tl_label, $target]);
+        $flash_msg = 'Linked "' . $tl_label . '". Re-run the sync to attach their hours.';
+    }
+}
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'unlink') {
+    $target = (int)($_POST['hrms_id'] ?? 0);
+    if ($target) {
+        $conn->prepare("UPDATE users SET tl_name=NULL WHERE id=?")->execute([$target]);
+        $flash_msg = 'Link removed.';
+    }
+}
+
 $date = $_GET['date'] ?? date('Y-m-d');
 if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) $date = date('Y-m-d');
 
@@ -119,9 +144,11 @@ if ($api_key !== '') {
 // of the three keys the sync tries (tl_guid, emp_no, email) succeeds or fails.
 $map_rows = [];
 if ($api_key !== '' && !empty($entries)) {
-    $hu = $conn->query("SELECT id, name, email, emp_no, tl_guid FROM users")->fetchAll();
-    $by_guid = $by_code = $by_email = $by_name = [];
+    $hu = $conn->query("SELECT id, name, email, emp_no, tl_guid, tl_name FROM users ORDER BY name")->fetchAll();
+    $all_hrms = $hu; // dropdown options for the link control below
+    $by_guid = $by_code = $by_email = $by_name = $by_alias = [];
     foreach ($hu as $h) {
+        if (!empty($h['tl_name'])) $by_alias[mb_strtolower(trim($h['tl_name']))] = $h;
         if (!empty($h['tl_guid'])) $by_guid[$h['tl_guid']]                      = $h;
         if (!empty($h['emp_no']))  $by_code[strtoupper(trim($h['emp_no']))]     = $h;
         if (!empty($h['email']))   $by_email[strtolower(trim($h['email']))]     = $h;
@@ -129,15 +156,25 @@ if ($api_key !== '' && !empty($entries)) {
     }
 
     $guid_by_code = $guid_by_email = $email_by_code = $email_by_guid = [];
+    $email_by_name = $guid_by_name = $name_seen = [];
     if (!isset($users['error'])) {
+        foreach ($ulist as $tu) {
+            $n = mb_strtolower(trim($tu['name'] ?? $tu['employeeName'] ?? $tu['fullName'] ?? $tu['username'] ?? ''));
+            if ($n !== '') $name_seen[$n] = ($name_seen[$n] ?? 0) + 1;
+        }
         foreach ($ulist as $tu) {
             $c = strtoupper(trim($tu['employeeCode'] ?? $tu['empCode'] ?? $tu['code'] ?? $tu['employeeId'] ?? ''));
             $e = strtolower(trim($tu['email'] ?? $tu['employeeEmail'] ?? ''));
             $g = $tu['guid'] ?? $tu['id'] ?? $tu['userId'] ?? '';
+            $n = mb_strtolower(trim($tu['name'] ?? $tu['employeeName'] ?? $tu['fullName'] ?? $tu['username'] ?? ''));
             if ($c && $g) $guid_by_code[$c]  = $g;
             if ($e && $g) $guid_by_email[$e] = $g;
             if ($c && $e) $email_by_code[$c] = $e;
             if ($g && $e) $email_by_guid[$g] = $e;
+            if ($n && ($name_seen[$n] ?? 0) === 1) {
+                if ($e) $email_by_name[$n] = $e;
+                if ($g) $guid_by_name[$n]  = $g;
+            }
         }
     }
 
@@ -145,15 +182,20 @@ if ($api_key !== '' && !empty($entries)) {
         $code  = strtoupper(trim($e['employeeCode'] ?? $e['empCode'] ?? $e['code'] ?? $e['employeeId'] ?? ''));
         $email = strtolower(trim($e['employeeEmail'] ?? $e['email'] ?? ''));
         $name  = trim($e['employeeName'] ?? $e['name'] ?? $e['fullName'] ?? $e['username'] ?? '');
-        $guid  = ($code ? ($guid_by_code[$code] ?? null) : null) ?? ($email ? ($guid_by_email[$email] ?? null) : null);
+        $nm2   = mb_strtolower(trim($name));
+        $guid  = ($code ? ($guid_by_code[$code] ?? null) : null)
+              ?? ($email ? ($guid_by_email[$email] ?? null) : null)
+              ?? ($nm2 ? ($guid_by_name[$nm2] ?? null) : null);
 
         // The punch report often has no email — the roster usually does.
         $roster_email = ($code && isset($email_by_code[$code])) ? $email_by_code[$code]
-                      : (($guid && isset($email_by_guid[$guid])) ? $email_by_guid[$guid] : '');
+                      : (($guid && isset($email_by_guid[$guid])) ? $email_by_guid[$guid]
+                      : (($nm2 && isset($email_by_name[$nm2])) ? $email_by_name[$nm2] : ''));
         $use_email = $email ?: $roster_email;
 
         $hit = null; $via = '';
-        if ($guid  && isset($by_guid[$guid]))   { $hit = $by_guid[$guid];   $via = 'tl_guid'; }
+        if ($name && isset($by_alias[mb_strtolower(trim($name))])) { $hit = $by_alias[mb_strtolower(trim($name))]; $via = 'tl_name'; }
+        if (!$hit && $guid  && isset($by_guid[$guid]))   { $hit = $by_guid[$guid];   $via = 'tl_guid'; }
         if (!$hit && $code  && isset($by_code[$code]))   { $hit = $by_code[$code];   $via = 'emp_no'; }
         if (!$hit && $use_email && isset($by_email[$use_email])) {
             $hit = $by_email[$use_email];
@@ -220,6 +262,12 @@ say($rows, "Your own rows, $from → $date", count($mineRows) > 0,
 <h1>TeamLogger sync diagnostic</h1>
 <div class="sub">Read-only. Nothing on this page changes any data.</div>
 
+<?php if ($flash_msg): ?>
+<div style="background:#dcfce7;color:#166534;padding:10px 13px;border-radius:10px;margin-bottom:14px;font-weight:600;">
+    <?= htmlspecialchars($flash_msg) ?>
+</div>
+<?php endif; ?>
+
 <form method="GET">
     <label>Date <input type="date" name="date" value="<?= htmlspecialchars($date) ?>" max="<?= date('Y-m-d') ?>"></label>
     <button>Check</button>
@@ -246,7 +294,7 @@ say($rows, "Your own rows, $from → $date", count($mineRows) > 0,
     stored with <code>user_id NULL</code> and are invisible to every report.
 </div>
 <table>
-    <tr><th>TL code</th><th>TL name</th><th>Email on punch row</th><th>Email on roster</th><th>Matched?</th><th>HRMS user</th><th>What to fix</th></tr>
+    <tr><th>TL code</th><th>TL name</th><th>Email on punch row</th><th>Email on roster</th><th>Matched?</th><th>HRMS user</th><th>Link to</th></tr>
     <?php foreach ($map_rows as $r): ?>
     <tr>
         <td><code><?= htmlspecialchars($r['code'] ?: '—') ?></code></td>
@@ -255,7 +303,36 @@ say($rows, "Your own rows, $from → $date", count($mineRows) > 0,
         <td><?= htmlspecialchars($r['roster_email'] ?: '—') ?></td>
         <td class="<?= $r['hit'] ? 'ok' : 'bad' ?>"><?= $r['hit'] ? 'via ' . $r['via'] : 'NO' ?></td>
         <td><?= $r['hit'] ? htmlspecialchars($r['hit']['name'] . ' (id ' . $r['hit']['id'] . ')') : '—' ?></td>
-        <td><?= $r['hit'] ? '' : htmlspecialchars($r['hint']) ?></td>
+        <td>
+            <?php if ($r['hit'] && $r['via'] === 'tl_name'): ?>
+                <form method="POST" style="display:flex;gap:6px;align-items:center;">
+                    <input type="hidden" name="action" value="unlink">
+                    <input type="hidden" name="hrms_id" value="<?= (int)$r['hit']['id'] ?>">
+                    <span style="font-size:12px;color:#64748b;">aliased</span>
+                    <button style="background:#e2e8f0;color:#0f172a">Unlink</button>
+                </form>
+            <?php elseif ($r['hit']): ?>
+                <span style="font-size:12px;color:#64748b;">—</span>
+            <?php elseif ($r['name'] === ''): ?>
+                <span style="font-size:12px;color:#b91c1c;">No name, code or email — nothing to link on. Fix this person's TeamLogger profile.</span>
+            <?php else: ?>
+                <form method="POST" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+                    <input type="hidden" name="action" value="link">
+                    <input type="hidden" name="tl_name" value="<?= htmlspecialchars($r['name']) ?>">
+                    <select name="hrms_id" style="max-width:230px;">
+                        <option value="">Choose HRMS user…</option>
+                        <?php foreach (($all_hrms ?? []) as $h):
+                            $sel = (mb_strtolower(trim($h['name'])) === mb_strtolower(trim($r['name']))) ? 'selected' : ''; ?>
+                        <option value="<?= (int)$h['id'] ?>" <?= $sel ?>>
+                            <?= htmlspecialchars($h['name'] . ($h['email'] ? ' — ' . $h['email'] : '')) ?>
+                        </option>
+                        <?php endforeach; ?>
+                    </select>
+                    <button>Link</button>
+                </form>
+                <div style="font-size:11.5px;color:#64748b;margin-top:3px;"><?= htmlspecialchars($r['hint']) ?></div>
+            <?php endif; ?>
+        </td>
     </tr>
     <?php endforeach; ?>
 </table>

@@ -868,6 +868,10 @@ if ($workspace_beta && ($tab === 'report' || isset($_GET['export']))) {
         $rep_from = date('Y-m-d', strtotime($rep_to . ' -186 days'));
     }
 
+    // Clean the subject's abandoned timers too — otherwise a teammate who never opens the
+    // board keeps accruing multi-day sessions that only this report ever surfaces.
+    if ($rep_uid !== (int)$uid) close_stale_task_timers($conn, $rep_uid, 12);
+
     $rq = $conn->prepare("SELECT tt.task_id, tt.started_at, tt.auto_closed,
             COALESCE(tt.ended_at, NOW()) AS ended_at, t.title, t.project_id, p.name AS project_name
         FROM task_timers tt
@@ -2035,7 +2039,8 @@ if (!empty($flash)): ?>
     color:var(--text-muted); padding:6px 8px; border-bottom:1px solid var(--card-bdr); }
 .wsr-table td { padding:7px 8px; border-bottom:1px solid var(--card-bdr); color:var(--text-secondary); }
 .wsr-table tr:last-child td { border-bottom:none; }
-.wsr-table td.num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.wsr-table td.num, .wsr-table th.num { text-align:right; }
+.wsr-table td.num { font-variant-numeric:tabular-nums; white-space:nowrap; }
 .wsr-table a { color:var(--text-primary); text-decoration:none; font-weight:600; }
 .wsr-table a:hover { color:var(--primary); }
 .wsr-warn { font-size:.75rem; color:#b45309; background:rgba(245,158,11,.12);
@@ -2100,6 +2105,22 @@ if (!empty($flash)): ?>
 <div class="wsr-warn"><i class="bi bi-info-circle me-1"></i>
     No TeamLogger activity is synced for this range, so there is nothing to compare against.
     <?= $r_can_sync ? 'Use Sync TeamLogger above.' : 'Ask an admin to sync it.' ?>
+</div>
+<?php endif; ?>
+
+<?php if (!empty($rep['sum']['suspect']['count'])): ?>
+<div class="wsr-warn">
+    <i class="bi bi-exclamation-triangle me-1"></i>
+    <strong><?= (int)$rep['sum']['suspect']['count'] ?> session(s) ran longer than 12 hours and are excluded from the totals below</strong>
+    — a card was left in In&nbsp;Progress rather than being worked that whole time.
+    <?php if ($rep['sum']['suspect']['tasks']): ?>
+    <div style="margin-top:6px;">
+        <?php foreach (array_slice($rep['sum']['suspect']['tasks'], 0, 5, true) as $tid => $secs): ?>
+        <div>· <a href="task_detail.php?id=<?= (int)$tid ?>"><?= sanitize($rep['titles'][$tid] ?? ('Task #' . $tid)) ?></a>
+            — <?= fmt_hm($secs) ?> in one stretch</div>
+        <?php endforeach; ?>
+    </div>
+    <?php endif; ?>
 </div>
 <?php endif; ?>
 

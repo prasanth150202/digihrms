@@ -116,14 +116,30 @@ $guid_by_email = [];
 // so it can be backfilled onto each punch row below.
 $email_by_code = [];
 $email_by_guid = [];
+// Some punch rows arrive with no code and no email at all, leaving the name as the only
+// key they share with the roster. Index by name as well so those rows can still reach the
+// roster's email — but count the names first, because two people sharing one is not a
+// link, it is a coin toss.
+$email_by_name = [];
+$guid_by_name  = [];
+$name_seen     = [];
+foreach ($tl_users as $tu) {
+    $n = mb_strtolower(trim($tu['name'] ?? $tu['employeeName'] ?? $tu['fullName'] ?? $tu['username'] ?? ''));
+    if ($n !== '') $name_seen[$n] = ($name_seen[$n] ?? 0) + 1;
+}
 foreach ($tl_users as $tu) {
     $c = strtoupper(trim($tu['employeeCode'] ?? $tu['empCode'] ?? $tu['code'] ?? $tu['employeeId'] ?? ''));
     $e = strtolower(trim($tu['email'] ?? $tu['employeeEmail'] ?? ''));
     $g = $tu['guid'] ?? $tu['id'] ?? $tu['userId'] ?? '';
+    $n = mb_strtolower(trim($tu['name'] ?? $tu['employeeName'] ?? $tu['fullName'] ?? $tu['username'] ?? ''));
     if ($c && $g) $guid_by_code[$c]  = $g;
     if ($e && $g) $guid_by_email[$e] = $g;
     if ($c && $e) $email_by_code[$c] = $e;
     if ($g && $e) $email_by_guid[$g] = $e;
+    if ($n && ($name_seen[$n] ?? 0) === 1) {
+        if ($e) $email_by_name[$n] = $e;
+        if ($g) $guid_by_name[$n]  = $g;
+    }
 }
 
 // ── 3. Fetch timesheet for each employee in parallel ─────
@@ -204,6 +220,17 @@ $get_user = function(string $emp_code, string $email, ?string $guid = null, stri
             $s->execute([$guid]); $uid = $s->fetchColumn() ?: null;
         } catch (Exception $e) { /* column not present on this install */ }
     }
+    // Explicit alias set by a human on the diagnostic page. Some TeamLogger people send
+    // only a name, and it need not spell the same as the HRMS one, so this is the only
+    // durable link available for them.
+    if (!$uid && $name !== '') {
+        try {
+            $s = $conn->prepare("SELECT id FROM users WHERE LOWER(TRIM(tl_name))=? LIMIT 1");
+            $s->execute([mb_strtolower(trim($name))]);
+            $uid = $s->fetchColumn() ?: null;
+            if ($uid) $via = 'tl_name';
+        } catch (Exception $e) { /* column not present on this install */ }
+    }
     if (!$uid && $emp_code) {
         $s = $conn->prepare("SELECT id FROM users WHERE UPPER(emp_no)=? LIMIT 1");
         $s->execute([$emp_code]); $uid = $s->fetchColumn() ?: null;
@@ -251,12 +278,17 @@ foreach ($entries as $row) {
     $break_h   = isset($row['breakHours']) && (float)$row['breakHours'] > 0 ? (string)round((float)$row['breakHours'], 4) : null;
     $ec2       = strtoupper(trim($row['employeeCode'] ?? $row['empCode'] ?? $row['code'] ?? $row['employeeId'] ?? ''));
     $em2       = strtolower(trim($row['employeeEmail'] ?? $row['email'] ?? ''));
-    $guid      = ($ec2 ? ($guid_by_code[$ec2] ?? null) : null) ?? ($em2 ? ($guid_by_email[$em2] ?? null) : null);
+    $nm2       = mb_strtolower(trim($tl_name));
+    $guid      = ($ec2 ? ($guid_by_code[$ec2] ?? null) : null)
+              ?? ($em2 ? ($guid_by_email[$em2] ?? null) : null)
+              ?? ($nm2 ? ($guid_by_name[$nm2] ?? null) : null);
     // Punch rows often have no email; take it from the roster so matching has something to
-    // work with when emp_no is unset in HRMS, which is the usual case.
+    // work with when emp_no is unset in HRMS, which is the usual case. Falling back to the
+    // name last covers rows carrying neither a code nor an address.
     if ($email === '') {
         $email = ($ec2 && isset($email_by_code[$ec2])) ? $email_by_code[$ec2]
-               : (($guid && isset($email_by_guid[$guid])) ? $email_by_guid[$guid] : '');
+               : (($guid && isset($email_by_guid[$guid])) ? $email_by_guid[$guid]
+               : (($nm2 && isset($email_by_name[$nm2])) ? $email_by_name[$nm2] : ''));
     }
     $totals    = $guid ? ($seg_totals[$guid] ?? null) : null;
     $idle_h    = $totals && $totals['idle']    > 0 ? (string)round($totals['idle'],    4) : null;
