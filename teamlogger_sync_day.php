@@ -192,8 +192,8 @@ $conn->prepare("DELETE FROM attendance WHERE date=? AND source='TEAMLOGGER'")->e
 
 // Cache user lookups within this request
 $user_cache = [];
-$get_user = function(string $emp_code, string $email, ?string $guid = null) use ($conn, &$user_cache): ?int {
-    $key = $emp_code . '|' . $email . '|' . (string)$guid;
+$get_user = function(string $emp_code, string $email, ?string $guid = null, string $name = '', &$via = null) use ($conn, &$user_cache): ?int {
+    $key = $emp_code . '|' . $email . '|' . (string)$guid . '|' . $name;
     if (array_key_exists($key, $user_cache)) return $user_cache[$key];
     $uid = null;
     // tl_guid first: it is the explicit link set by the "map user" screen in teamlogger.php,
@@ -211,6 +211,18 @@ $get_user = function(string $emp_code, string $email, ?string $guid = null) use 
     if (!$uid && $email) {
         $s = $conn->prepare("SELECT id FROM users WHERE LOWER(email)=? LIMIT 1");
         $s->execute([strtolower($email)]); $uid = $s->fetchColumn() ?: null;
+        if ($uid) $via = 'email';
+    } elseif ($uid && !$via) { $via = $guid ? 'tl_guid' : 'emp_no'; }
+
+    // Last resort. Some TeamLogger people carry neither a code nor an address, leaving the
+    // name as the only key in existence. Accept it only when exactly one HRMS user bears
+    // that name — a second match means we cannot tell whose hours these are, and guessing
+    // would file someone's day under a colleague.
+    if (!$uid && $name !== '') {
+        $s = $conn->prepare("SELECT id FROM users WHERE LOWER(TRIM(name))=? LIMIT 2");
+        $s->execute([mb_strtolower(trim($name))]);
+        $ids = $s->fetchAll(PDO::FETCH_COLUMN);
+        if (count($ids) === 1) { $uid = (int)$ids[0]; $via = 'name'; }
     }
     return $user_cache[$key] = $uid;
 };
@@ -219,7 +231,7 @@ $synced = 0; $skipped = 0;
 // A row still inserts when no HRMS user matches, just with user_id NULL — which makes it
 // invisible to anything that filters by user. Count those separately so a sync that stores
 // 31 rows against nobody cannot report itself as a clean success.
-$linked = 0; $unlinked = [];
+$linked = 0; $unlinked = []; $by_name = [];
 
 foreach ($entries as $row) {
     $emp_code = strtoupper(trim(
@@ -264,8 +276,14 @@ foreach ($entries as $row) {
         if ($pi_h > 9.75) $status = 'LATE';
     }
 
-    $usr = $get_user($emp_code, $email, $guid);
-    if ($usr) { $linked++; } else { $unlinked[] = $emp_code ?: ($email ?: $tl_name); }
+    $match_via = null;
+    $usr = $get_user($emp_code, $email, $guid, $tl_name, $match_via);
+    if ($usr) {
+        $linked++;
+        if ($match_via === 'name') $by_name[] = $tl_name;
+    } else {
+        $unlinked[] = $tl_name ?: ($emp_code ?: $email);
+    }
 
     try {
         $conn->prepare("
@@ -289,4 +307,6 @@ $dbg = ['synced'=>$synced,'skipped'=>$skipped,'error'=>null,
 file_put_contents(__DIR__.'/tl_sd_debug.json', json_encode($dbg, JSON_PRETTY_PRINT));
 echo json_encode(['synced'=>$synced,'skipped'=>$skipped,'error'=>null,
     'linked'=>$linked, 'unlinked'=>count($unlinked),
-    'unlinked_who'=>array_values(array_slice(array_filter($unlinked), 0, 20))]);
+    'unlinked_who'=>array_values(array_unique(array_filter($unlinked))),
+    'by_name'=>count($by_name),
+    'by_name_who'=>array_values(array_unique(array_filter($by_name)))]);

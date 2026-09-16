@@ -850,7 +850,13 @@ if ($workspace_beta && ($tab === 'report' || isset($_GET['export']))) {
         }
     }
     $rep_uid = (int)($_GET['user'] ?? $uid);
-    if (!in_array($rep_uid, array_column($rep_people, 'id'), true)) $rep_uid = (int)$uid;
+    // Falling back silently would be indistinguishable from the picker not working, so
+    // remember that it happened and say so below.
+    $rep_denied = false;
+    if (!in_array($rep_uid, array_column($rep_people, 'id'), true)) {
+        $rep_denied = $rep_uid !== (int)$uid;
+        $rep_uid    = (int)$uid;
+    }
 
     $rep_to   = (string)($_GET['to']   ?? date('Y-m-d'));
     $rep_from = (string)($_GET['from'] ?? date('Y-m-d', strtotime('-6 days')));
@@ -938,7 +944,7 @@ if ($workspace_beta && ($tab === 'report' || isset($_GET['export']))) {
 
     $rep = [
         'uid' => $rep_uid, 'from' => $rep_from, 'to' => $rep_to,
-        'people' => $rep_people, 'days' => $rep_days, 'sum' => $rep_sum,
+        'people' => $rep_people, 'days' => $rep_days, 'sum' => $rep_sum, 'denied' => $rep_denied,
         'titles' => $rep_titles, 'auto' => $rep_auto,
         'projects' => $rep_projects, 'proj_name' => $rep_proj_name, 'task_proj' => $rep_task_proj,
         'att' => $rep_att, 'att_ok' => $rep_att_ok, 'active_total' => $rep_active_total,
@@ -2045,7 +2051,8 @@ if (!empty($flash)): ?>
     <?php if (count($rep['people']) > 1): ?>
     <div>
         <label>Person</label>
-        <select name="user" class="form-select form-select-sm" style="min-width:180px;">
+        <select name="user" class="form-select form-select-sm" style="min-width:180px;"
+                onchange="this.form.submit()">
             <?php foreach ($rep['people'] as $pp): ?>
             <option value="<?= (int)$pp['id'] ?>" <?= $pp['id'] === $rep['uid'] ? 'selected' : '' ?>>
                 <?= sanitize($pp['name']) ?>
@@ -2080,6 +2087,12 @@ if (!empty($flash)): ?>
         <?php endforeach; ?>
     </div>
 </form>
+
+<?php if ($rep['denied']): ?>
+<div class="wsr-warn"><i class="bi bi-shield-exclamation me-1"></i>
+    That person is not in your team, so this is showing your own time instead.
+</div>
+<?php endif; ?>
 
 <?php if (!$rep['att_ok']): ?>
 <div class="wsr-warn"><i class="bi bi-info-circle me-1"></i>TeamLogger activity could not be read, so only tracked task time is shown.</div>
@@ -2225,7 +2238,7 @@ if (!empty($flash)): ?>
 
     function run() {
         btn.disabled = true;
-        var i = 0, synced = 0, failed = 0, linked = 0, unlinked = 0, lastErr = '', who = [];
+        var i = 0, synced = 0, failed = 0, linked = 0, unlinked = 0, byName = 0, lastErr = '', who = [], nameWho = [];
 
         function step() {
             if (i >= days.length) {
@@ -2252,6 +2265,13 @@ if (!empty($flash)): ?>
                 showToast('Synced ' + synced + ' record(s), ' + linked + ' linked' +
                           (failed ? ', ' + failed + ' day(s) failed' : '') + '.',
                           failed ? 'warning' : 'success', 'TeamLogger');
+                // Matching on name alone is a weaker claim than a code or address, so it is
+                // always announced — a wrong one files someone's hours under a colleague.
+                if (nameWho.length) {
+                    showToast('Matched by name only: ' + nameWho.join(', ') +
+                              '. Check these are the right people, then set their employee code in TeamLogger.',
+                              'info', 'Loose match', 12000);
+                }
                 setTimeout(function () { location.reload(); }, 900);
                 return;
             }
@@ -2266,8 +2286,12 @@ if (!empty($flash)): ?>
                     synced   += (j && j.synced)   || 0;
                     linked   += (j && j.linked)   || 0;
                     unlinked += (j && j.unlinked) || 0;
+                    byName += (j && j.by_name) || 0;
                     if (j && j.unlinked_who) {
                         j.unlinked_who.forEach(function (n) { if (who.indexOf(n) === -1) who.push(n); });
+                    }
+                    if (j && j.by_name_who) {
+                        j.by_name_who.forEach(function (n) { if (nameWho.indexOf(n) === -1) nameWho.push(n); });
                     }
                 })
                 .catch(function () { failed++; lastErr = 'Could not reach the sync endpoint.'; })
