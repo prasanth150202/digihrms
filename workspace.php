@@ -1,6 +1,8 @@
 <?php
 require_once 'config.php';
 require_login();
+require_once 'task_timer_helper.php';
+require_once 'digiops_sync_helper.php';
 
 $page      = 'workspace';
 $pageTitle = 'Workspace';
@@ -23,53 +25,63 @@ if (!$beta_enabled) {
     exit;
 }
 
+function log_task_activity_ws($conn, $task_id, $user_id, $action, $detail = '') {
+    $conn->prepare("INSERT INTO task_activity_logs (task_id,user_id,action,detail) VALUES (?,?,?,?)")
+         ->execute([$task_id, $user_id, $action, $detail]);
+}
+
 // ── POST handlers ──────────────────────────────────────────
+// Focus/Stop reuse the same timer + status machinery as tasks.php's "update_status"
+// action (start_task_timer/stop_task_timer, task_comments, activity log, DigiOps sync)
+// instead of a separate tracking mechanism, so this is one source of truth for time spent.
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 
     if ($_POST['action'] === 'set_focus') {
         $tid = (int)($_POST['task_id'] ?? 0);
-        $chk = $conn->prepare("SELECT id FROM tasks WHERE id=? AND assigned_to=? AND deleted_at IS NULL");
+        $chk = $conn->prepare("SELECT id, status FROM tasks WHERE id=? AND assigned_to=? AND deleted_at IS NULL");
         $chk->execute([$tid, $uid]);
-        if ($chk->fetch()) {
-            // Server-side guard: the UI disables switching without stopping first, but that's
-            // only a client-side attribute — auto-close any still-open focus so every
-            // FOCUS_STARTED always gets a matching FOCUS_STOPPED (needed for time-matching later).
-            $prev = $conn->prepare("SELECT current_focus_task_id, focus_started_at FROM users WHERE id=?");
-            $prev->execute([$uid]);
-            $prev = $prev->fetch();
-            if ($prev && $prev['current_focus_task_id'] && (int)$prev['current_focus_task_id'] !== $tid) {
-                $mins = $prev['focus_started_at'] ? max(0, round((time() - strtotime($prev['focus_started_at'])) / 60)) : 0;
-                $conn->prepare("INSERT INTO task_activity_logs (task_id,user_id,action,detail) VALUES (?,?,?,?)")
-                     ->execute([$prev['current_focus_task_id'], $uid, 'FOCUS_STOPPED', "Focused for {$mins}m (switched)"]);
+        $task = $chk->fetch();
+
+        if ($task) {
+            // Only one focused task at a time — stop any other active timer this user has running.
+            $others = $conn->prepare("SELECT id FROM tasks WHERE assigned_to=? AND timer_status='ACTIVE' AND id<>?");
+            $others->execute([$uid, $tid]);
+            foreach ($others->fetchAll() as $o) {
+                stop_task_timer($conn, (int)$o['id'], $uid);
             }
-            $conn->prepare("UPDATE users SET current_focus_task_id=?, focus_started_at=NOW() WHERE id=?")
-                 ->execute([$tid, $uid]);
-            $conn->prepare("INSERT INTO task_activity_logs (task_id,user_id,action,detail) VALUES (?,?,?,?)")
-                 ->execute([$tid, $uid, 'FOCUS_STARTED', 'Focus started']);
+
+            start_task_timer($conn, $tid, $uid);
+
+            // Moving a fresh task to Focus also nudges it into In Progress on the board —
+            // mirrors tasks.php's own TODO -> IN_PROGRESS transition, including DigiOps sync.
+            if ($task['status'] === 'TODO') {
+                $conn->prepare("UPDATE tasks SET status='IN_PROGRESS', updated_at=NOW() WHERE id=?")->execute([$tid]);
+                $conn->prepare("INSERT INTO task_comments (task_id,user_id,comment) VALUES (?,?,?)")
+                     ->execute([$tid, $uid, "Stage moved: TODO → IN_PROGRESS"]);
+                log_task_activity_ws($conn, $tid, $uid, 'STATUS_CHANGED', 'TODO → IN_PROGRESS');
+                _digiops_task_sync($conn, $tid, 'IN_PROGRESS');
+            }
         }
         header('Location: workspace.php'); exit;
     }
 
     if ($_POST['action'] === 'clear_focus') {
-        $s = $conn->prepare("SELECT current_focus_task_id, focus_started_at FROM users WHERE id=?");
-        $s->execute([$uid]);
-        $row = $s->fetch();
-        if ($row && $row['current_focus_task_id']) {
-            $mins = $row['focus_started_at'] ? max(0, round((time() - strtotime($row['focus_started_at'])) / 60)) : 0;
-            $conn->prepare("INSERT INTO task_activity_logs (task_id,user_id,action,detail) VALUES (?,?,?,?)")
-                 ->execute([$row['current_focus_task_id'], $uid, 'FOCUS_STOPPED', "Focused for {$mins}m"]);
+        $tid = (int)($_POST['task_id'] ?? 0);
+        $chk = $conn->prepare("SELECT id FROM tasks WHERE id=? AND assigned_to=?");
+        $chk->execute([$tid, $uid]);
+        if ($chk->fetch()) {
+            stop_task_timer($conn, $tid, $uid);
         }
-        $conn->prepare("UPDATE users SET current_focus_task_id=NULL, focus_started_at=NULL WHERE id=?")->execute([$uid]);
         header('Location: workspace.php'); exit;
     }
 }
 
 // ── Data ──────────────────────────────────────────────────
-$me = $conn->prepare("SELECT current_focus_task_id, focus_started_at FROM users WHERE id=?");
-$me->execute([$uid]);
-$me = $me->fetch();
-$focus_task_id    = $me['current_focus_task_id'] ?? null;
-$focus_started_at = $me['focus_started_at'] ?? null;
+$active = $conn->prepare("SELECT id, timer_started_at FROM tasks WHERE assigned_to=? AND timer_status='ACTIVE' AND deleted_at IS NULL LIMIT 1");
+$active->execute([$uid]);
+$active = $active->fetch();
+$focus_task_id    = $active['id'] ?? null;
+$focus_started_at = $active['timer_started_at'] ?? null;
 
 $tasks = $conn->prepare("SELECT t.*, p.name as project_name
     FROM tasks t
@@ -105,7 +117,7 @@ include 'header.php';
 <div class="d-flex justify-content-between align-items-center mb-4">
     <div>
         <h5 class="fw-bold mb-0"><i class="bi bi-kanban me-2"></i>Workspace</h5>
-        <div class="text-muted small">Pick one task to focus on — click it again to stop.</div>
+        <div class="text-muted small">Click Focus to start working on a task — it moves to In Progress and starts the timer.</div>
     </div>
 </div>
 
@@ -129,13 +141,16 @@ include 'header.php';
                     <div class="text-muted small mb-2"><?= sanitize($t['project_name']) ?></div>
                     <?php endif; ?>
 
-                    <?php if ($is_focused): ?>
+                    <?php if ($status === 'DONE'): ?>
+                        <!-- No timer controls on completed tasks -->
+                    <?php elseif ($is_focused): ?>
                         <div class="small fw-semibold text-primary mb-2">
                             <i class="bi bi-record-circle-fill me-1"></i>
                             Focused <span class="focus-timer" data-started="<?= sanitize($focus_started_at) ?>">00:00:00</span>
                         </div>
                         <form method="POST">
                             <input type="hidden" name="action" value="clear_focus">
+                            <input type="hidden" name="task_id" value="<?= (int)$t['id'] ?>">
                             <button class="btn btn-outline-primary btn-sm w-100">Stop</button>
                         </form>
                     <?php else: ?>
