@@ -863,9 +863,10 @@ if ($workspace_beta && ($tab === 'report' || isset($_GET['export']))) {
     }
 
     $rq = $conn->prepare("SELECT tt.task_id, tt.started_at, tt.auto_closed,
-            COALESCE(tt.ended_at, NOW()) AS ended_at, t.title
+            COALESCE(tt.ended_at, NOW()) AS ended_at, t.title, t.project_id, p.name AS project_name
         FROM task_timers tt
         JOIN tasks t ON t.id = tt.task_id
+        LEFT JOIN projects p ON p.id = t.project_id
         WHERE tt.user_id = ?
           AND tt.started_at < ? + INTERVAL 1 DAY
           AND COALESCE(tt.ended_at, NOW()) > ?
@@ -876,10 +877,27 @@ if ($workspace_beta && ($tab === 'report' || isset($_GET['export']))) {
     $rep_sum    = summarize_task_time($rep_rows, $rep_from, $rep_to);
     $rep_titles = [];
     $rep_auto   = [];
+    $rep_task_proj = []; // task_id => project key ('' when the task has no project)
+    $rep_proj_name = ['' => 'No project'];
     foreach ($rep_rows as $r) {
-        $rep_titles[(int)$r['task_id']] = $r['title'];
-        if (!empty($r['auto_closed'])) $rep_auto[(int)$r['task_id']] = true;
+        $tid = (int)$r['task_id'];
+        $rep_titles[$tid] = $r['title'];
+        if (!empty($r['auto_closed'])) $rep_auto[$tid] = true;
+        $pk = !empty($r['project_id']) ? (string)(int)$r['project_id'] : '';
+        $rep_task_proj[$tid] = $pk;
+        if ($pk !== '') $rep_proj_name[$pk] = $r['project_name'] ?: ('Project #' . $pk);
     }
+
+    // Project totals are the task totals regrouped, so the two tables reconcile exactly
+    // against the "Sum per task" tile. Both carry the same overlap caveat.
+    $rep_projects = [];
+    foreach ($rep_sum['tasks'] as $tid => $secs) {
+        $pk = $rep_task_proj[$tid] ?? '';
+        if (!isset($rep_projects[$pk])) $rep_projects[$pk] = ['secs' => 0, 'tasks' => 0];
+        $rep_projects[$pk]['secs']  += $secs;
+        $rep_projects[$pk]['tasks'] += 1;
+    }
+    uasort($rep_projects, fn($a, $b) => $b['secs'] <=> $a['secs']);
 
     // TeamLogger activity is already synced into `attendance` as one row per person per
     // day, so the comparison costs a join rather than an API call. MAX() because a day can
@@ -901,13 +919,19 @@ if ($workspace_beta && ($tab === 'report' || isset($_GET['export']))) {
     }
 
     $rep_active_total = 0.0;
-    foreach ($rep_days as $d) $rep_active_total += (float)($rep_att[$d]['ah'] ?? 0);
+    $rep_worked_total = 0.0;
+    foreach ($rep_days as $d) {
+        $rep_active_total += (float)($rep_att[$d]['ah'] ?? 0);
+        $rep_worked_total += (float)($rep_att[$d]['th'] ?? 0);
+    }
 
     $rep = [
         'uid' => $rep_uid, 'from' => $rep_from, 'to' => $rep_to,
         'people' => $rep_people, 'days' => $rep_days, 'sum' => $rep_sum,
         'titles' => $rep_titles, 'auto' => $rep_auto,
+        'projects' => $rep_projects, 'proj_name' => $rep_proj_name, 'task_proj' => $rep_task_proj,
         'att' => $rep_att, 'att_ok' => $rep_att_ok, 'active_total' => $rep_active_total,
+        'worked_total' => $rep_worked_total,
     ];
 
     // CSV export — must finish before header.php emits any markup.
@@ -917,12 +941,12 @@ if ($workspace_beta && ($tab === 'report' || isset($_GET['export']))) {
         header('Content-Type: text/csv; charset=utf-8');
         header('Content-Disposition: attachment; filename="task_time_' . $rep_from . '_to_' . $rep_to . '.csv"');
         $out = fopen('php://output', 'w');
-        fputcsv($out, ['Person', 'Date', 'Task', 'Tracked hours', 'Day covered hours',
+        fputcsv($out, ['Person', 'Date', 'Project', 'Task', 'Tracked hours', 'Day covered hours',
                        'TeamLogger active', 'TeamLogger idle', 'TeamLogger meeting', 'Auto-closed']);
         foreach ($rep_days as $d) {
             $day = $rep_sum['days'][$d] ?? null;
             if (!$day || !$day['tasks']) {
-                fputcsv($out, [$who, $d, '(nothing tracked)', '0.00', '0.00',
+                fputcsv($out, [$who, $d, '', '(nothing tracked)', '0.00', '0.00',
                     number_format((float)($rep_att[$d]['ah'] ?? 0), 2, '.', ''),
                     number_format((float)($rep_att[$d]['ih'] ?? 0), 2, '.', ''),
                     number_format((float)($rep_att[$d]['mh'] ?? 0), 2, '.', ''), '']);
@@ -931,6 +955,7 @@ if ($workspace_beta && ($tab === 'report' || isset($_GET['export']))) {
             foreach ($day['tasks'] as $tid => $secs) {
                 fputcsv($out, [
                     $who, $d,
+                    $rep_proj_name[$rep_task_proj[$tid] ?? ''] ?? 'No project',
                     $rep_titles[$tid] ?? ('Task #' . $tid),
                     number_format($secs / 3600, 2, '.', ''),
                     number_format($day['covered'] / 3600, 2, '.', ''),
@@ -1962,6 +1987,7 @@ if (!empty($flash)): ?>
     $r_cov  = $rep['sum']['covered'];
     $r_trk  = $rep['sum']['tracked'];
     $r_act  = $rep['active_total'] * 3600;
+    $r_wrk  = $rep['worked_total'] * 3600;
     $r_pct  = $r_act > 0 ? min(999, round($r_cov / $r_act * 100)) : null;
     $r_self = $rep['uid'] === (int)$uid;
 ?>
@@ -2047,6 +2073,11 @@ if (!empty($flash)): ?>
 <?php endif; ?>
 
 <div class="wsr-tiles">
+    <div class="wsr-tile">
+        <div class="v"><?= $rep['att_ok'] && $r_wrk > 0 ? fmt_hm((int)$r_wrk) : '—' ?></div>
+        <div class="l">Total worked</div>
+        <div class="s">TeamLogger hours logged, active and idle</div>
+    </div>
     <div class="wsr-tile accent">
         <div class="v"><?= fmt_hm($r_cov) ?></div>
         <div class="l">Time on tasks</div>
@@ -2075,12 +2106,36 @@ if (!empty($flash)): ?>
 </div>
 
 <div class="wsr-card">
+    <h6>By project</h6>
+    <?php if (!$rep['projects']): ?>
+    <div class="wsr-muted">Nothing was tracked in this range.</div>
+    <?php else: ?>
+    <table class="wsr-table">
+        <thead><tr><th>Project</th><th class="num">Tasks</th><th class="num">Tracked</th><th class="num">Share</th></tr></thead>
+        <tbody>
+        <?php foreach ($rep['projects'] as $pk => $pr): ?>
+            <tr>
+                <td<?= $pk === '' ? ' class="wsr-muted"' : '' ?>><?= sanitize($rep['proj_name'][$pk] ?? 'No project') ?></td>
+                <td class="num"><?= (int)$pr['tasks'] ?></td>
+                <td class="num"><?= fmt_hm($pr['secs']) ?></td>
+                <td class="num"><?= $r_trk > 0 ? round($pr['secs'] / $r_trk * 100) . '%' : '—' ?></td>
+            </tr>
+        <?php endforeach; ?>
+        </tbody>
+    </table>
+    <div class="wsr-muted" style="margin-top:9px;">
+        Totals here regroup the same task time, so they add up to <strong><?= fmt_hm($r_trk) ?></strong> — the sum-per-task figure, not wall-clock time.
+    </div>
+    <?php endif; ?>
+</div>
+
+<div class="wsr-card">
     <h6>Where the time went</h6>
     <?php if (!$rep['sum']['tasks']): ?>
     <div class="wsr-muted">Nothing was tracked in this range.</div>
     <?php else: ?>
     <table class="wsr-table">
-        <thead><tr><th>Task</th><th class="num">Tracked</th><th class="num">Share</th></tr></thead>
+        <thead><tr><th>Task</th><th>Project</th><th class="num">Tracked</th><th class="num">Share</th></tr></thead>
         <tbody>
         <?php foreach ($rep['sum']['tasks'] as $tid => $secs): ?>
             <tr>
@@ -2090,6 +2145,7 @@ if (!empty($flash)): ?>
                     <i class="bi bi-exclamation-triangle-fill ms-1" style="color:#f59e0b;font-size:.72rem;" title="Includes an auto-closed session"></i>
                     <?php endif; ?>
                 </td>
+                <td class="wsr-muted"><?= sanitize($rep['proj_name'][$rep['task_proj'][$tid] ?? ''] ?? 'No project') ?></td>
                 <td class="num"><?= fmt_hm($secs) ?></td>
                 <td class="num"><?= $r_trk > 0 ? round($secs / $r_trk * 100) . '%' : '—' ?></td>
             </tr>
