@@ -586,6 +586,21 @@
         <i class="bi bi-list-task"></i> Tasks
     </a>
     <?php
+    // Beta Workspace nav item — hidden for everyone unless workspace_beta=1.
+    // Wrapped defensively so a not-yet-migrated column never breaks this shared header.
+    $workspace_beta_nav = false;
+    try {
+        $wbn = $conn->prepare("SELECT workspace_beta FROM users WHERE id=?");
+        $wbn->execute([$u['id']]);
+        $workspace_beta_nav = (bool)$wbn->fetchColumn();
+    } catch (Exception $e) { $workspace_beta_nav = false; }
+    ?>
+    <?php if ($workspace_beta_nav): ?>
+    <a href="workspace.php" class="nav-link <?= ($page ?? '') === 'workspace' ? 'active' : '' ?>">
+        <i class="bi bi-kanban"></i> Workspace
+    </a>
+    <?php endif; ?>
+    <?php
     // Show approval badge count in sidebar
     $appr_count = 0;
     if (!empty($u) && !in_array($u['role'] ?? '', ['HR_ADMIN'])) {
