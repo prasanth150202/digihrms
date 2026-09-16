@@ -31,6 +31,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         $chk = $conn->prepare("SELECT id FROM tasks WHERE id=? AND assigned_to=? AND deleted_at IS NULL");
         $chk->execute([$tid, $uid]);
         if ($chk->fetch()) {
+            // Server-side guard: the UI disables switching without stopping first, but that's
+            // only a client-side attribute — auto-close any still-open focus so every
+            // FOCUS_STARTED always gets a matching FOCUS_STOPPED (needed for time-matching later).
+            $prev = $conn->prepare("SELECT current_focus_task_id, focus_started_at FROM users WHERE id=?");
+            $prev->execute([$uid]);
+            $prev = $prev->fetch();
+            if ($prev && $prev['current_focus_task_id'] && (int)$prev['current_focus_task_id'] !== $tid) {
+                $mins = $prev['focus_started_at'] ? max(0, round((time() - strtotime($prev['focus_started_at'])) / 60)) : 0;
+                $conn->prepare("INSERT INTO task_activity_logs (task_id,user_id,action,detail) VALUES (?,?,?,?)")
+                     ->execute([$prev['current_focus_task_id'], $uid, 'FOCUS_STOPPED', "Focused for {$mins}m (switched)"]);
+            }
             $conn->prepare("UPDATE users SET current_focus_task_id=?, focus_started_at=NOW() WHERE id=?")
                  ->execute([$tid, $uid]);
             $conn->prepare("INSERT INTO task_activity_logs (task_id,user_id,action,detail) VALUES (?,?,?,?)")
@@ -131,8 +142,8 @@ include 'header.php';
                         <form method="POST">
                             <input type="hidden" name="action" value="set_focus">
                             <input type="hidden" name="task_id" value="<?= (int)$t['id'] ?>">
-                            <button class="btn btn-primary btn-sm w-100" <?= $focus_task_id ? 'disabled title="Stop your current focus first"' : '' ?>>
-                                <i class="bi bi-play-fill me-1"></i>Focus
+                            <button class="btn btn-primary btn-sm w-100">
+                                <i class="bi bi-play-fill me-1"></i><?= $focus_task_id ? 'Switch focus' : 'Focus' ?>
                             </button>
                         </form>
                     <?php endif; ?>
