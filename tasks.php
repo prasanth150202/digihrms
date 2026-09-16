@@ -2004,6 +2004,8 @@ if (!empty($flash)): ?>
     $r_wrk  = $rep['worked_total'] * 3600;
     $r_pct  = $r_act > 0 ? min(999, round($r_cov / $r_act * 100)) : null;
     $r_self = $rep['uid'] === (int)$uid;
+    // teamlogger_sync_day.php is hard-gated to these two roles, so only they get the button.
+    $r_can_sync = in_array($role, ['SUPER_ADMIN','HR_ADMIN'], true);
 ?>
 
 <style>
@@ -2065,6 +2067,12 @@ if (!empty($flash)): ?>
        href="?tab=report&amp;user=<?= (int)$rep['uid'] ?>&amp;from=<?= urlencode($rep['from']) ?>&amp;to=<?= urlencode($rep['to']) ?>&amp;export=1">
         <i class="bi bi-download me-1"></i>CSV
     </a>
+    <?php if ($r_can_sync): ?>
+    <button type="button" id="wsrSync" class="btn btn-sm btn-outline-primary" style="border-radius:8px;">
+        <i class="bi bi-arrow-repeat me-1"></i>Sync TeamLogger
+    </button>
+    <span id="wsrSyncMsg" class="wsr-muted align-self-center"></span>
+    <?php endif; ?>
     <div class="ms-auto d-flex gap-1 align-items-end">
         <?php foreach (['7 days' => 6, '30 days' => 29] as $lbl => $back): ?>
         <a class="btn btn-sm btn-light" style="border-radius:8px;"
@@ -2076,7 +2084,10 @@ if (!empty($flash)): ?>
 <?php if (!$rep['att_ok']): ?>
 <div class="wsr-warn"><i class="bi bi-info-circle me-1"></i>TeamLogger activity could not be read, so only tracked task time is shown.</div>
 <?php elseif ($r_act <= 0): ?>
-<div class="wsr-warn"><i class="bi bi-info-circle me-1"></i>No TeamLogger activity is synced for this range, so there is nothing to compare against. Sync it from the TeamLogger page.</div>
+<div class="wsr-warn"><i class="bi bi-info-circle me-1"></i>
+    No TeamLogger activity is synced for this range, so there is nothing to compare against.
+    <?= $r_can_sync ? 'Use Sync TeamLogger above.' : 'Ask an admin to sync it.' ?>
+</div>
 <?php endif; ?>
 
 <?php if ($rep['auto']): ?>
@@ -2198,6 +2209,53 @@ if (!empty($flash)): ?>
 </div>
 
 </div>
+
+<?php if ($r_can_sync): ?>
+<script>
+// Walks the visible range one day at a time, the same contract teamlogger.php's range-sync
+// modal uses: POST date=YYYY-MM-DD to teamlogger_sync_day.php -> {synced, skipped, error}.
+// Strictly sequential — each day rewrites that whole day for every employee and can take
+// up to 120s server-side, so firing them in parallel would hammer the TeamLogger API.
+(function () {
+    var btn = document.getElementById('wsrSync');
+    if (!btn) return;
+    var msg  = document.getElementById('wsrSyncMsg');
+    var days = <?= json_encode($rep['days']) ?>;
+    var MAX  = 31;
+
+    btn.addEventListener('click', function () {
+        if (days.length > MAX) {
+            msg.textContent = 'Range is ' + days.length + ' days — narrow it to ' + MAX + ' or fewer to sync.';
+            return;
+        }
+        if (!confirm('Re-sync ' + days.length + ' day(s) from TeamLogger?\n\nThis replaces the stored TeamLogger attendance for those days, for everyone — not just this person.')) return;
+
+        btn.disabled = true;
+        var i = 0, synced = 0, failed = 0;
+
+        function step() {
+            if (i >= days.length) {
+                msg.textContent = 'Synced ' + synced + ' record(s)' + (failed ? ', ' + failed + ' day(s) failed' : '') + '. Reloading…';
+                setTimeout(function () { location.reload(); }, 900);
+                return;
+            }
+            var d = days[i++];
+            msg.textContent = 'Syncing ' + d + ' (' + i + '/' + days.length + ')…';
+            var fd = new FormData();
+            fd.append('date', d);
+            fetch('teamlogger_sync_day.php', { method: 'POST', body: fd, credentials: 'same-origin' })
+                .then(function (r) { return r.json(); })
+                .then(function (j) {
+                    if (j && j.error) { failed++; } else { synced += (j && j.synced) || 0; }
+                })
+                .catch(function () { failed++; })
+                .then(step);
+        }
+        step();
+    });
+})();
+</script>
+<?php endif; ?>
 
 <script>
 // Chart.js is loaded by footer.php, i.e. after this markup, so defer until parsing is done.
