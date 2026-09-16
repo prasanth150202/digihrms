@@ -2004,8 +2004,8 @@ if (!empty($flash)): ?>
     $r_wrk  = $rep['worked_total'] * 3600;
     $r_pct  = $r_act > 0 ? min(999, round($r_cov / $r_act * 100)) : null;
     $r_self = $rep['uid'] === (int)$uid;
-    // teamlogger_sync_day.php is hard-gated to these two roles, so only they get the button.
-    $r_can_sync = in_array($role, ['SUPER_ADMIN','HR_ADMIN'], true);
+    // Must stay in step with the role check in teamlogger_sync_day.php.
+    $r_can_sync = in_array($role, ['SUPER_ADMIN','HR_ADMIN','DEPT_MANAGER','TEAM_LEAD'], true);
 ?>
 
 <style>

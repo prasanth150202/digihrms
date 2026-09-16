@@ -7,9 +7,18 @@
  */
 require_once 'config.php';
 require_login();
-require_role('SUPER_ADMIN', 'HR_ADMIN');
 
 header('Content-Type: application/json');
+
+// Team leads and managers sync their own reporting data, so they are allowed here too;
+// plain employees are not. Answered as JSON rather than through require_role(), whose
+// HTML error page would break every caller — they all parse this response as JSON.
+if (!in_array($_SESSION['user']['role'] ?? '', ['SUPER_ADMIN','HR_ADMIN','DEPT_MANAGER','TEAM_LEAD'], true)) {
+    http_response_code(403);
+    echo json_encode(['synced' => 0, 'skipped' => 0, 'error' => 'You do not have permission to sync.']);
+    exit;
+}
+
 set_time_limit(120);
 
 $date = $_POST['date'] ?? '';
