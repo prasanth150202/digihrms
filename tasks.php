@@ -2223,19 +2223,21 @@ if (!empty($flash)): ?>
     var days = <?= json_encode($rep['days']) ?>;
     var MAX  = 31;
 
-    btn.addEventListener('click', function () {
-        if (days.length > MAX) {
-            msg.textContent = 'Range is ' + days.length + ' days — narrow it to ' + MAX + ' or fewer to sync.';
-            return;
-        }
-        if (!confirm('Re-sync ' + days.length + ' day(s) from TeamLogger?\n\nThis replaces the stored TeamLogger attendance for those days, for everyone — not just this person.')) return;
-
+    function run() {
         btn.disabled = true;
-        var i = 0, synced = 0, failed = 0;
+        var i = 0, synced = 0, failed = 0, lastErr = '';
 
         function step() {
             if (i >= days.length) {
-                msg.textContent = 'Synced ' + synced + ' record(s)' + (failed ? ', ' + failed + ' day(s) failed' : '') + '. Reloading…';
+                if (failed && !synced) {
+                    btn.disabled = false;
+                    msg.textContent = '';
+                    showToast(lastErr || 'Nothing could be synced.', 'error', 'Sync failed');
+                    return;
+                }
+                msg.textContent = 'Reloading…';
+                showToast('Synced ' + synced + ' record(s)' + (failed ? ', ' + failed + ' day(s) failed' : '') + '.',
+                          failed ? 'warning' : 'success', 'TeamLogger');
                 setTimeout(function () { location.reload(); }, 900);
                 return;
             }
@@ -2246,12 +2248,25 @@ if (!empty($flash)): ?>
             fetch('teamlogger_sync_day.php', { method: 'POST', body: fd, credentials: 'same-origin' })
                 .then(function (r) { return r.json(); })
                 .then(function (j) {
-                    if (j && j.error) { failed++; } else { synced += (j && j.synced) || 0; }
+                    if (j && j.error) { failed++; lastErr = j.error; } else { synced += (j && j.synced) || 0; }
                 })
-                .catch(function () { failed++; })
+                .catch(function () { failed++; lastErr = 'Could not reach the sync endpoint.'; })
                 .then(step);
         }
         step();
+    }
+
+    btn.addEventListener('click', function () {
+        if (days.length > MAX) {
+            showToast('Narrow the range to ' + MAX + ' days or fewer before syncing.', 'warning', 'Range too long');
+            return;
+        }
+        // hConfirm() is the app's shared modal (assets/hconfirm.js); safe:true makes the
+        // action button blue rather than red, since this refreshes data rather than deletes.
+        hConfirm('This replaces the stored TeamLogger attendance for ' + days.length +
+                 ' day(s) — for everyone, not just the person shown here.',
+                 { title: 'Re-sync from TeamLogger?', ok: 'Sync ' + days.length + ' day(s)', safe: true })
+            .then(function (ok) { if (ok) run(); });
     });
 })();
 </script>
