@@ -582,12 +582,10 @@
         <i class="bi bi-person-circle"></i> My Profile
     </a>
     <?php endif; ?>
-    <a href="tasks.php" class="nav-link <?= ($page ?? '') === 'tasks' ? 'active' : '' ?>">
-        <i class="bi bi-list-task"></i> Tasks
-    </a>
     <?php
-    // Beta Workspace nav item — hidden for everyone unless workspace_beta=1.
-    // Wrapped defensively so a not-yet-migrated column never breaks this shared header.
+    // Beta Workspace replaces the Tasks nav item for opted-in users — same page underneath,
+    // landing on the focus Board tab. Wrapped defensively so a not-yet-migrated column
+    // never breaks this shared header.
     $workspace_beta_nav = false;
     try {
         $wbn = $conn->prepare("SELECT workspace_beta FROM users WHERE id=?");
@@ -596,8 +594,12 @@
     } catch (Exception $e) { $workspace_beta_nav = false; }
     ?>
     <?php if ($workspace_beta_nav): ?>
-    <a href="workspace.php" class="nav-link <?= ($page ?? '') === 'workspace' ? 'active' : '' ?>">
+    <a href="tasks.php?tab=board" class="nav-link <?= ($page ?? '') === 'tasks' ? 'active' : '' ?>">
         <i class="bi bi-kanban"></i> Workspace
+    </a>
+    <?php else: ?>
+    <a href="tasks.php" class="nav-link <?= ($page ?? '') === 'tasks' ? 'active' : '' ?>">
+        <i class="bi bi-list-task"></i> Tasks
     </a>
     <?php endif; ?>
     <?php

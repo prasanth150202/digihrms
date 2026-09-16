@@ -21,6 +21,16 @@ $role      = $u['role'];
 $is_tl     = in_array($role, ['SUPER_ADMIN','TEAM_LEAD','DEPT_MANAGER']);
 $hr_view   = $role === 'HR_ADMIN';
 
+// Beta Workspace: adds the focus Board tab and makes it the landing view for opted-in
+// users. Wrapped so a not-yet-migrated column leaves everyone on the classic task list.
+$workspace_beta = false;
+try {
+    $wb = $conn->prepare("SELECT workspace_beta FROM users WHERE id=?");
+    $wb->execute([$uid]);
+    $workspace_beta = (bool)$wb->fetchColumn();
+} catch (Exception $e) { $workspace_beta = false; }
+if ($workspace_beta) $pageTitle = 'Workspace';
+
 function log_task_activity($conn, $task_id, $user_id, $action, $detail = '') {
     $conn->prepare("INSERT INTO task_activity_logs (task_id,user_id,action,detail) VALUES (?,?,?,?)")
          ->execute([$task_id, $user_id, $action, $detail]);
@@ -123,6 +133,43 @@ if ($is_ajax && empty($_POST['action']) && !empty($_GET['action'])) {
 
 // Create task (TL/Admin only)
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
+
+    // ── Board tab: focus one task at a time ────────────────
+    // Reuses the same timer + status machinery as 'update_status' below rather than a
+    // parallel tracking mechanism, so time spent has one source of truth.
+    if ($_POST['action'] === 'set_focus') {
+        $tid = (int)($_POST['task_id'] ?? 0);
+        $chk = $conn->prepare("SELECT id, status FROM tasks WHERE id=? AND assigned_to=? AND deleted_at IS NULL");
+        $chk->execute([$tid, $uid]);
+        $task = $chk->fetch();
+
+        if ($task) {
+            $others = $conn->prepare("SELECT id FROM tasks WHERE assigned_to=? AND timer_status='ACTIVE' AND id<>?");
+            $others->execute([$uid, $tid]);
+            foreach ($others->fetchAll() as $o) stop_task_timer($conn, (int)$o['id'], $uid);
+
+            start_task_timer($conn, $tid, $uid);
+
+            if ($task['status'] === 'TODO') {
+                $conn->prepare("UPDATE tasks SET status='IN_PROGRESS', updated_at=NOW() WHERE id=?")->execute([$tid]);
+                $conn->prepare("INSERT INTO task_comments (task_id,user_id,comment) VALUES (?,?,?)")
+                     ->execute([$tid, $uid, "Stage moved: TODO → IN_PROGRESS"]);
+                log_task_activity($conn, $tid, $uid, 'STATUS_CHANGED', 'TODO → IN_PROGRESS');
+                _digiops_task_sync($conn, $tid, 'IN_PROGRESS');
+            }
+        }
+        if ($is_ajax) ajax_ok();
+        header('Location: tasks.php?tab=board'); exit;
+    }
+
+    if ($_POST['action'] === 'clear_focus') {
+        $tid = (int)($_POST['task_id'] ?? 0);
+        $chk = $conn->prepare("SELECT id FROM tasks WHERE id=? AND assigned_to=?");
+        $chk->execute([$tid, $uid]);
+        if ($chk->fetch()) stop_task_timer($conn, $tid, $uid);
+        if ($is_ajax) ajax_ok();
+        header('Location: tasks.php?tab=board'); exit;
+    }
 
     // Employee (or HR) creates a task for themselves
     if ($_POST['action'] === 'create_own_task' && !$is_tl) {
@@ -725,7 +772,8 @@ if (isset($_GET['delete'])) {
     header("Location: tasks.php?tab=bin"); exit;
 }
 
-$tab = isset($_GET['_frag']) ? 'my' : ($_GET['tab'] ?? 'my');
+$tab = isset($_GET['_frag']) ? 'my' : ($_GET['tab'] ?? ($workspace_beta ? 'board' : 'my'));
+if ($tab === 'board' && !$workspace_beta) $tab = 'my';
 
 // ── FETCH BLOCK REQUESTS for current user (only ones directed at me by user ID) ──
 $my_block_requests = [];
@@ -787,6 +835,21 @@ if ($role === 'SUPER_ADMIN' || $role === 'DEPT_MANAGER') {
         ORDER BY FIELD(t.priority,'URGENT','HIGH','MEDIUM','LOW'), t.due_date ASC");
     $my_tasks->execute([$uid]);
     $my_tasks = $my_tasks->fetchAll();
+}
+
+// ── BOARD TAB DATA (beta Workspace) ──────────────────────
+// The board is personal even for a TL, whose $my_tasks also carries their team's work.
+$focus_task_id = null;
+$focus_started_at = null;
+$board_tasks = [];
+if ($workspace_beta) {
+    $af = $conn->prepare("SELECT id, timer_started_at FROM tasks WHERE assigned_to=? AND timer_status='ACTIVE' AND deleted_at IS NULL LIMIT 1");
+    $af->execute([$uid]);
+    if ($afr = $af->fetch()) {
+        $focus_task_id    = (int)$afr['id'];
+        $focus_started_at = $afr['timer_started_at'];
+    }
+    $board_tasks = array_values(array_filter($my_tasks, fn($t) => (int)$t['assigned_to'] === (int)$uid));
 }
 
 // Incoming requests (TL only)
@@ -1344,7 +1407,7 @@ $status_color   = ['TODO'=>'secondary','IN_PROGRESS'=>'primary','REVIEW'=>'warni
 <div class="tm-page-header d-flex justify-content-between align-items-center flex-wrap gap-3">
     <div>
         <h5 class="fw-bold mb-1" style="font-size:1.15rem;">
-            <i class="bi bi-kanban-fill me-2 text-primary"></i>Task Management
+            <i class="bi bi-kanban-fill me-2 text-primary"></i><?= $workspace_beta ? 'Workspace' : 'Task Management' ?>
         </h5>
         <div class="text-muted" style="font-size:.82rem;">
             <?php if ($hr_view): ?>
@@ -1494,6 +1557,12 @@ if (!empty($flash)): ?>
 
 <!-- ── TABS ───────────────────────────────────────────── -->
 <div class="tm-tabs">
+    <?php if ($workspace_beta): ?>
+    <a class="tm-tab <?= $tab==='board'?'active':'' ?>" href="?tab=board">
+        <i class="bi bi-kanban"></i> Board
+        <span class="tab-badge"><?= count($board_tasks) ?></span>
+    </a>
+    <?php endif; ?>
     <a class="tm-tab <?= $tab==='my'?'active':'' ?>" href="?tab=my">
         <i class="bi bi-list-task"></i>
         <?= $role==='TEAM_LEAD' ? 'Team Tasks' : ($hr_view ? 'All Tasks' : 'My Tasks') ?>
@@ -1553,6 +1622,112 @@ if (!empty($flash)): ?>
     </a>
     <?php endif; ?>
 </div>
+
+<!-- ── TAB: BOARD (beta Workspace) ─────────────────────── -->
+<?php if ($tab === 'board'):
+    $board_cols = [
+        'TODO'        => 'To Do',
+        'IN_PROGRESS' => 'In Progress',
+        'REWORK'      => 'Rework',
+        'BLOCKED'     => 'Blocked',
+        'REVIEW'      => 'Review',
+        'DONE'        => 'Done',
+    ];
+    $board = [];
+    foreach ($board_cols as $k => $label) $board[$k] = ['label' => $label, 'items' => []];
+    foreach ($board_tasks as $t) {
+        if (isset($board[$t['status']])) $board[$t['status']]['items'][] = $t;
+    }
+    // Keep the board tidy — drop the exception columns when nothing is in them
+    foreach (['REWORK','BLOCKED'] as $optional) {
+        if (empty($board[$optional]['items'])) unset($board[$optional]);
+    }
+    $board_pri = ['URGENT'=>'#ef4444','HIGH'=>'#f59e0b','MEDIUM'=>'#3b82f6','LOW'=>'#94a3b8'];
+?>
+
+<div class="text-muted mb-3" style="font-size:.82rem;">
+    <i class="bi bi-record-circle me-1"></i>Focus a task to start its timer — it moves to In Progress automatically. Only one task can be focused at a time.
+</div>
+
+<div class="d-flex gap-3 pb-3" style="overflow-x:auto;">
+    <?php foreach ($board as $status => $col): ?>
+    <div style="min-width:260px;max-width:260px;flex-shrink:0;">
+        <div class="text-muted small fw-semibold text-uppercase mb-2" style="letter-spacing:.4px;">
+            <?= sanitize($col['label']) ?> <span class="text-muted"><?= count($col['items']) ?></span>
+        </div>
+        <div class="d-flex flex-column gap-2">
+            <?php foreach ($col['items'] as $t): $is_focused = $focus_task_id === (int)$t['id']; ?>
+            <div class="card border-0 shadow-sm" style="border-radius:12px;<?= $is_focused ? 'outline:2px solid #3b82f6;' : '' ?>">
+                <div class="card-body p-3">
+                    <?php if (!empty($t['priority']) && isset($board_pri[$t['priority']])): ?>
+                    <span class="badge mb-2" style="background:<?= $board_pri[$t['priority']] ?>22;color:<?= $board_pri[$t['priority']] ?>;font-size:.65rem;">
+                        <?= sanitize($t['priority']) ?>
+                    </span>
+                    <?php endif; ?>
+                    <div class="fw-semibold small mb-1">
+                        <a href="task_detail.php?id=<?= (int)$t['id'] ?>" class="text-dark text-decoration-none">
+                            <?= sanitize($t['title']) ?>
+                        </a>
+                    </div>
+                    <?php if (!empty($t['project_name'])): ?>
+                    <div class="text-muted small mb-2"><?= sanitize($t['project_name']) ?></div>
+                    <?php endif; ?>
+                    <a href="task_detail.php?id=<?= (int)$t['id'] ?>" class="small text-muted d-block mb-2">
+                        <i class="bi bi-chat-left-text me-1"></i>Details &amp; comments
+                    </a>
+
+                    <?php if ($status === 'DONE'): ?>
+                        <!-- No timer controls on completed tasks -->
+                    <?php elseif ($is_focused): ?>
+                        <div class="small fw-semibold text-primary mb-2">
+                            <i class="bi bi-record-circle-fill me-1"></i>
+                            Focused <span class="focus-timer" data-started="<?= sanitize($focus_started_at) ?>">00:00:00</span>
+                        </div>
+                        <form method="POST">
+                            <input type="hidden" name="action" value="clear_focus">
+                            <input type="hidden" name="task_id" value="<?= (int)$t['id'] ?>">
+                            <button class="btn btn-outline-primary btn-sm w-100">Stop</button>
+                        </form>
+                    <?php else: ?>
+                        <form method="POST">
+                            <input type="hidden" name="action" value="set_focus">
+                            <input type="hidden" name="task_id" value="<?= (int)$t['id'] ?>">
+                            <button class="btn btn-primary btn-sm w-100">
+                                <i class="bi bi-play-fill me-1"></i><?= $focus_task_id ? 'Switch focus' : 'Focus' ?>
+                            </button>
+                        </form>
+                    <?php endif; ?>
+                </div>
+            </div>
+            <?php endforeach; ?>
+            <?php if (!$col['items']): ?>
+            <div class="text-muted small fst-italic px-1">Nothing here.</div>
+            <?php endif; ?>
+        </div>
+    </div>
+    <?php endforeach; ?>
+</div>
+
+<script>
+(function() {
+    var els = document.querySelectorAll('.focus-timer');
+    if (!els.length) return;
+    function tick() {
+        els.forEach(function(el) {
+            var started = new Date(el.dataset.started.replace(' ', 'T'));
+            var diff = Math.max(0, Math.floor((Date.now() - started.getTime()) / 1000));
+            var h = String(Math.floor(diff / 3600)).padStart(2, '0');
+            var m = String(Math.floor((diff % 3600) / 60)).padStart(2, '0');
+            var s = String(diff % 60).padStart(2, '0');
+            el.textContent = h + ':' + m + ':' + s;
+        });
+    }
+    tick();
+    setInterval(tick, 1000);
+})();
+</script>
+
+<?php endif; ?>
 
 <!-- ── TAB: TASKS ─────────────────────────────────────── -->
 <?php if ($tab === 'my'): ?>

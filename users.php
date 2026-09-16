@@ -550,7 +550,7 @@ function copyInviteLink() {
                             <label class="form-check-label small" for="edit_workspace_beta">
                                 <i class="bi bi-kanban text-primary me-1"></i>Workspace beta
                                 <span class="text-muted fw-normal d-block" style="font-size:.72rem;">
-                                    Adds a "Workspace" kanban board with a per-task focus timer, for the beta team only.
+                                    Replaces the Tasks nav item with a "Workspace" that opens on a kanban board with a per-task focus timer. Beta team only.
                                 </span>
                             </label>
                         </div>

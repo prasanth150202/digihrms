@@ -11,7 +11,7 @@ $role = $u['role'];
 try {
     $wbi = $conn->prepare("SELECT workspace_beta FROM users WHERE id=?");
     $wbi->execute([$u['id']]);
-    if ((bool)$wbi->fetchColumn()) { header('Location: workspace.php'); exit; }
+    if ((bool)$wbi->fetchColumn()) { header('Location: tasks.php?tab=board'); exit; }
 } catch (Exception $e) { /* migration not run yet — ignore */ }
 
 // ══════════════════════════════════════════════════════════
