@@ -154,4 +154,123 @@ function get_elapsed_timer_seconds($conn, $task_id, $user_id) {
     if (!$timer) return 0;
     return (int)$timer['elapsed_seconds'];
 }
+
+/**
+ * Close timers left running past $max_hours.
+ * The board starts a timer when a card enters In Progress and stops it only when the card
+ * leaves, so a card parked there overnight would otherwise bank the whole span as work.
+ * The capped duration is a guess, which is why the row is marked auto_closed for reports.
+ */
+function close_stale_task_timers($conn, $user_id, $max_hours = 12) {
+    $h = max(1, (int)$max_hours);
+    try {
+        $sel = $conn->prepare("SELECT id, task_id FROM task_timers
+            WHERE user_id = ? AND ended_at IS NULL AND started_at < NOW() - INTERVAL $h HOUR");
+        $sel->execute([$user_id]);
+        $rows = $sel->fetchAll();
+        if (!$rows) return 0;
+
+        $close = $conn->prepare("UPDATE task_timers
+            SET ended_at = started_at + INTERVAL $h HOUR, duration_seconds = ?, auto_closed = 1
+            WHERE id = ?");
+        $idle = $conn->prepare("UPDATE tasks SET timer_status='INACTIVE', timer_started_at=NULL WHERE id=?");
+        foreach ($rows as $r) {
+            $close->execute([$h * 3600, (int)$r['id']]);
+            $idle->execute([(int)$r['task_id']]);
+        }
+        return count($rows);
+    } catch (Exception $e) {
+        error_log("Stale timer close error: " . $e->getMessage());
+        return 0;
+    }
+}
+
+/**
+ * Turn raw timer intervals into per-day and per-task totals.
+ *
+ * Intervals are split at midnight so an evening session never credits its hours to the
+ * following day, and each task's contribution to a single day is capped, since no one
+ * works one task for more than $day_cap_h hours in a day.
+ *
+ * Two different totals come out of this, and they answer different questions:
+ *   tracked = sum of every task's time. Two tasks left In Progress at once each count in
+ *             full, by design, so this can exceed the hours in a day.
+ *   covered = the union of the intervals, i.e. wall-clock time with at least one task
+ *             running. This is the one to compare against TeamLogger's active hours.
+ *
+ * @param array $rows each ['task_id','started_at','ended_at']
+ */
+function summarize_task_time(array $rows, string $from, string $to, int $day_cap_h = 16): array {
+    $range_start = strtotime($from . ' 00:00:00');
+    $range_end   = strtotime($to   . ' 00:00:00 +1 day');
+    $cap         = $day_cap_h * 3600;
+
+    $days = [];
+    foreach ($rows as $r) {
+        $tid = (int)$r['task_id'];
+        $s   = max(strtotime($r['started_at']), $range_start);
+        $e   = min(strtotime($r['ended_at']),   $range_end);
+        if ($e <= $s) continue;
+
+        $cur = $s;
+        while ($cur < $e) {
+            $d        = date('Y-m-d', $cur);
+            $next_day = strtotime($d . ' 00:00:00 +1 day');
+            $seg_end  = min($e, $next_day);
+
+            if (!isset($days[$d])) $days[$d] = ['tasks' => [], 'intervals' => []];
+            $days[$d]['tasks'][$tid]  = ($days[$d]['tasks'][$tid] ?? 0) + ($seg_end - $cur);
+            $days[$d]['intervals'][]  = [$cur, $seg_end];
+
+            $cur = $seg_end;
+        }
+    }
+
+    $by_day = [];
+    $by_task = [];
+    $total_tracked = 0;
+    $total_covered = 0;
+
+    foreach ($days as $d => $bucket) {
+        $tracked = 0;
+        foreach ($bucket['tasks'] as $tid => $secs) {
+            $secs = min($secs, $cap);
+            $bucket['tasks'][$tid] = $secs;
+            $tracked += $secs;
+            $by_task[$tid] = ($by_task[$tid] ?? 0) + $secs;
+        }
+
+        // Union of intervals — overlapping work counts once against wall-clock time.
+        $covered = 0;
+        $ivs = $bucket['intervals'];
+        usort($ivs, fn($a, $b) => $a[0] <=> $b[0]);
+        $cs = $ce = null;
+        foreach ($ivs as $iv) {
+            if ($cs === null)        { [$cs, $ce] = $iv; continue; }
+            if ($iv[0] <= $ce)       { $ce = max($ce, $iv[1]); continue; }
+            $covered += $ce - $cs;
+            [$cs, $ce] = $iv;
+        }
+        if ($cs !== null) $covered += $ce - $cs;
+        $covered = min($covered, $cap);
+
+        $by_day[$d] = ['tracked' => $tracked, 'covered' => $covered, 'tasks' => $bucket['tasks']];
+        $total_tracked += $tracked;
+        $total_covered += $covered;
+    }
+
+    ksort($by_day);
+    arsort($by_task);
+    return ['days' => $by_day, 'tasks' => $by_task, 'tracked' => $total_tracked, 'covered' => $total_covered];
+}
+
+/** Seconds as "6h 12m" (or "—" for nothing). */
+function fmt_hm($seconds): string {
+    $seconds = (int)$seconds;
+    if ($seconds <= 0) return '—';
+    $h = intdiv($seconds, 3600);
+    $m = intdiv($seconds % 3600, 60);
+    if (!$h) return $m . 'm';
+    return $h . 'h ' . ($m ? $m . 'm' : '');
+}
 ?>

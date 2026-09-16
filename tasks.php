@@ -15,6 +15,8 @@ try { $conn->exec("ALTER TABLE tasks ADD COLUMN learning_badge_id INT NULL"); } 
 try { $conn->exec("ALTER TABLE tasks ADD COLUMN learning_material TEXT NULL"); } catch (PDOException $e) {}
 try { $conn->exec("ALTER TABLE tasks ADD COLUMN learning_pass_pct TINYINT NOT NULL DEFAULT 80"); } catch (PDOException $e) {}
 try { $conn->exec("ALTER TABLE tasks ADD COLUMN quiz_required     TINYINT(1) NOT NULL DEFAULT 0"); } catch (PDOException $e) {}
+// Marks a timer the system closed because it was left running (see close_stale_task_timers)
+try { $conn->exec("ALTER TABLE task_timers ADD COLUMN auto_closed TINYINT(1) NOT NULL DEFAULT 0"); } catch (PDOException $e) {}
 $u         = current_user();
 $uid       = $u['id'];
 $role      = $u['role'];
@@ -30,6 +32,10 @@ try {
     $workspace_beta = (bool)$wb->fetchColumn();
 } catch (Exception $e) { $workspace_beta = false; }
 if ($workspace_beta) $pageTitle = 'Workspace';
+
+// Sweep up timers left running from a previous day before anything reads them, so the
+// board and the report never show a session that has been open for 40 hours.
+if ($workspace_beta) close_stale_task_timers($conn, $uid, 12);
 
 function log_task_activity($conn, $task_id, $user_id, $action, $detail = '') {
     $conn->prepare("INSERT INTO task_activity_logs (task_id,user_id,action,detail) VALUES (?,?,?,?)")
@@ -736,7 +742,7 @@ if (isset($_GET['delete'])) {
 }
 
 $tab = isset($_GET['_frag']) ? 'my' : ($_GET['tab'] ?? ($workspace_beta ? 'board' : 'my'));
-if ($tab === 'board' && !$workspace_beta) $tab = 'my';
+if (in_array($tab, ['board','report'], true) && !$workspace_beta) $tab = 'my';
 
 // ── FETCH BLOCK REQUESTS for current user (only ones directed at me by user ID) ──
 $my_block_requests = [];
@@ -830,6 +836,115 @@ try {
         $quiz_passed_task_ids = array_column($kQpQ->fetchAll(), 'task_id');
     }
 } catch (PDOException $e) {}
+
+// ── REPORT TAB DATA (beta Workspace) ─────────────────────
+$rep = null;
+if ($workspace_beta && ($tab === 'report' || isset($_GET['export']))) {
+
+    // Scope: everyone sees themselves; managers additionally see their own team. The
+    // requested id is checked against that list rather than trusted from the query string.
+    $rep_people = [['id' => (int)$uid, 'name' => $u['name'] . ' (me)']];
+    if ($is_tl) {
+        foreach ($my_team as $m) {
+            if ((int)$m['id'] !== (int)$uid) $rep_people[] = ['id' => (int)$m['id'], 'name' => $m['name']];
+        }
+    }
+    $rep_uid = (int)($_GET['user'] ?? $uid);
+    if (!in_array($rep_uid, array_column($rep_people, 'id'), true)) $rep_uid = (int)$uid;
+
+    $rep_to   = (string)($_GET['to']   ?? date('Y-m-d'));
+    $rep_from = (string)($_GET['from'] ?? date('Y-m-d', strtotime('-6 days')));
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $rep_to))   $rep_to   = date('Y-m-d');
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $rep_from)) $rep_from = date('Y-m-d', strtotime('-6 days'));
+    if ($rep_from > $rep_to) { $tmp = $rep_from; $rep_from = $rep_to; $rep_to = $tmp; }
+    // summarize_task_time() walks every interval in PHP, so keep the window bounded.
+    if (strtotime($rep_to) - strtotime($rep_from) > 186 * 86400) {
+        $rep_from = date('Y-m-d', strtotime($rep_to . ' -186 days'));
+    }
+
+    $rq = $conn->prepare("SELECT tt.task_id, tt.started_at, tt.auto_closed,
+            COALESCE(tt.ended_at, NOW()) AS ended_at, t.title
+        FROM task_timers tt
+        JOIN tasks t ON t.id = tt.task_id
+        WHERE tt.user_id = ?
+          AND tt.started_at < ? + INTERVAL 1 DAY
+          AND COALESCE(tt.ended_at, NOW()) > ?
+        ORDER BY tt.started_at");
+    $rq->execute([$rep_uid, $rep_to, $rep_from]);
+    $rep_rows = $rq->fetchAll();
+
+    $rep_sum    = summarize_task_time($rep_rows, $rep_from, $rep_to);
+    $rep_titles = [];
+    $rep_auto   = [];
+    foreach ($rep_rows as $r) {
+        $rep_titles[(int)$r['task_id']] = $r['title'];
+        if (!empty($r['auto_closed'])) $rep_auto[(int)$r['task_id']] = true;
+    }
+
+    // TeamLogger activity is already synced into `attendance` as one row per person per
+    // day, so the comparison costs a join rather than an API call. MAX() because a day can
+    // carry rows from more than one source.
+    $rep_att = [];
+    $rep_att_ok = true;
+    try {
+        $aq = $conn->prepare("SELECT date,
+                MAX(active_hours) ah, MAX(idle_hours) ih, MAX(break_hours) bh,
+                MAX(meeting_hours) mh, MAX(total_hours) th
+            FROM attendance WHERE user_id = ? AND date >= ? AND date <= ? GROUP BY date");
+        $aq->execute([$rep_uid, $rep_from, $rep_to]);
+        foreach ($aq->fetchAll() as $a) $rep_att[$a['date']] = $a;
+    } catch (Exception $e) { $rep_att_ok = false; }
+
+    $rep_days = [];
+    for ($d = strtotime($rep_from); $d <= strtotime($rep_to); $d = strtotime('+1 day', $d)) {
+        $rep_days[] = date('Y-m-d', $d);
+    }
+
+    $rep_active_total = 0.0;
+    foreach ($rep_days as $d) $rep_active_total += (float)($rep_att[$d]['ah'] ?? 0);
+
+    $rep = [
+        'uid' => $rep_uid, 'from' => $rep_from, 'to' => $rep_to,
+        'people' => $rep_people, 'days' => $rep_days, 'sum' => $rep_sum,
+        'titles' => $rep_titles, 'auto' => $rep_auto,
+        'att' => $rep_att, 'att_ok' => $rep_att_ok, 'active_total' => $rep_active_total,
+    ];
+
+    // CSV export — must finish before header.php emits any markup.
+    if (isset($_GET['export'])) {
+        $who = 'me';
+        foreach ($rep_people as $pp) if ($pp['id'] === $rep_uid) $who = $pp['name'];
+        header('Content-Type: text/csv; charset=utf-8');
+        header('Content-Disposition: attachment; filename="task_time_' . $rep_from . '_to_' . $rep_to . '.csv"');
+        $out = fopen('php://output', 'w');
+        fputcsv($out, ['Person', 'Date', 'Task', 'Tracked hours', 'Day covered hours',
+                       'TeamLogger active', 'TeamLogger idle', 'TeamLogger meeting', 'Auto-closed']);
+        foreach ($rep_days as $d) {
+            $day = $rep_sum['days'][$d] ?? null;
+            if (!$day || !$day['tasks']) {
+                fputcsv($out, [$who, $d, '(nothing tracked)', '0.00', '0.00',
+                    number_format((float)($rep_att[$d]['ah'] ?? 0), 2, '.', ''),
+                    number_format((float)($rep_att[$d]['ih'] ?? 0), 2, '.', ''),
+                    number_format((float)($rep_att[$d]['mh'] ?? 0), 2, '.', ''), '']);
+                continue;
+            }
+            foreach ($day['tasks'] as $tid => $secs) {
+                fputcsv($out, [
+                    $who, $d,
+                    $rep_titles[$tid] ?? ('Task #' . $tid),
+                    number_format($secs / 3600, 2, '.', ''),
+                    number_format($day['covered'] / 3600, 2, '.', ''),
+                    number_format((float)($rep_att[$d]['ah'] ?? 0), 2, '.', ''),
+                    number_format((float)($rep_att[$d]['ih'] ?? 0), 2, '.', ''),
+                    number_format((float)($rep_att[$d]['mh'] ?? 0), 2, '.', ''),
+                    isset($rep_auto[$tid]) ? 'yes' : '',
+                ]);
+            }
+        }
+        fclose($out);
+        exit;
+    }
+}
 
 // Incoming requests (TL only)
 $incoming = [];
@@ -1541,6 +1656,9 @@ if (!empty($flash)): ?>
         <i class="bi bi-kanban"></i> Board
         <span class="tab-badge"><?= count($board_tasks) ?></span>
     </a>
+    <a class="tm-tab <?= $tab==='report'?'active':'' ?>" href="?tab=report">
+        <i class="bi bi-bar-chart-line"></i> Report
+    </a>
     <?php endif; ?>
     <a class="tm-tab <?= $tab==='my'?'active':'' ?>" href="?tab=my">
         <i class="bi bi-list-task"></i>
@@ -1838,6 +1956,210 @@ if (!empty($flash)): ?>
 </script>
 
 <?php endif; ?>
+
+<!-- ── TAB: REPORT (beta Workspace) ────────────────────── -->
+<?php if ($tab === 'report' && $rep):
+    $r_cov  = $rep['sum']['covered'];
+    $r_trk  = $rep['sum']['tracked'];
+    $r_act  = $rep['active_total'] * 3600;
+    $r_pct  = $r_act > 0 ? min(999, round($r_cov / $r_act * 100)) : null;
+    $r_self = $rep['uid'] === (int)$uid;
+?>
+
+<style>
+.wsr { font-family:var(--font); }
+.wsr-bar { display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; margin-bottom:18px; }
+.wsr-bar label { display:block; font-size:.68rem; font-weight:700; text-transform:uppercase;
+    letter-spacing:.05em; color:var(--text-muted); margin-bottom:4px; }
+.wsr-bar .form-control, .wsr-bar .form-select { font-size:.82rem; border-radius:8px; }
+.wsr-tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(168px,1fr)); gap:12px; margin-bottom:18px; }
+.wsr-tile { background:var(--card-bg); border:1px solid var(--card-bdr); border-radius:14px; padding:15px 18px; }
+.wsr-tile .v { font-size:1.55rem; font-weight:800; line-height:1.15; color:var(--text-primary); }
+.wsr-tile .l { font-size:.7rem; font-weight:600; text-transform:uppercase; letter-spacing:.05em;
+    color:var(--text-muted); margin-top:3px; }
+.wsr-tile .s { font-size:.72rem; color:var(--text-muted); margin-top:5px; }
+.wsr-tile.accent .v { color:var(--primary); }
+.wsr-card { background:var(--card-bg); border:1px solid var(--card-bdr); border-radius:14px;
+    padding:16px 18px; margin-bottom:16px; }
+.wsr-card h6 { font-size:.82rem; font-weight:700; color:var(--text-primary); margin-bottom:12px; }
+.wsr-table { width:100%; font-size:.82rem; }
+.wsr-table th { font-size:.68rem; font-weight:700; text-transform:uppercase; letter-spacing:.04em;
+    color:var(--text-muted); padding:6px 8px; border-bottom:1px solid var(--card-bdr); }
+.wsr-table td { padding:7px 8px; border-bottom:1px solid var(--card-bdr); color:var(--text-secondary); }
+.wsr-table tr:last-child td { border-bottom:none; }
+.wsr-table td.num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.wsr-table a { color:var(--text-primary); text-decoration:none; font-weight:600; }
+.wsr-table a:hover { color:var(--primary); }
+.wsr-warn { font-size:.75rem; color:#b45309; background:rgba(245,158,11,.12);
+    border-radius:8px; padding:8px 11px; margin-bottom:14px; }
+[data-theme="dark"] .wsr-warn { color:#fcd34d; }
+.wsr-muted { color:var(--text-muted); font-size:.8rem; }
+</style>
+
+<div class="wsr">
+
+<form method="GET" class="wsr-bar">
+    <input type="hidden" name="tab" value="report">
+    <?php if (count($rep['people']) > 1): ?>
+    <div>
+        <label>Person</label>
+        <select name="user" class="form-select form-select-sm" style="min-width:180px;">
+            <?php foreach ($rep['people'] as $pp): ?>
+            <option value="<?= (int)$pp['id'] ?>" <?= $pp['id'] === $rep['uid'] ? 'selected' : '' ?>>
+                <?= sanitize($pp['name']) ?>
+            </option>
+            <?php endforeach; ?>
+        </select>
+    </div>
+    <?php endif; ?>
+    <div>
+        <label>From</label>
+        <input type="date" name="from" value="<?= sanitize($rep['from']) ?>" max="<?= date('Y-m-d') ?>" class="form-control form-control-sm">
+    </div>
+    <div>
+        <label>To</label>
+        <input type="date" name="to" value="<?= sanitize($rep['to']) ?>" max="<?= date('Y-m-d') ?>" class="form-control form-control-sm">
+    </div>
+    <button class="btn btn-sm btn-primary" style="border-radius:8px;">Apply</button>
+    <a class="btn btn-sm btn-outline-secondary" style="border-radius:8px;"
+       href="?tab=report&amp;user=<?= (int)$rep['uid'] ?>&amp;from=<?= urlencode($rep['from']) ?>&amp;to=<?= urlencode($rep['to']) ?>&amp;export=1">
+        <i class="bi bi-download me-1"></i>CSV
+    </a>
+    <div class="ms-auto d-flex gap-1 align-items-end">
+        <?php foreach (['7 days' => 6, '30 days' => 29] as $lbl => $back): ?>
+        <a class="btn btn-sm btn-light" style="border-radius:8px;"
+           href="?tab=report&amp;user=<?= (int)$rep['uid'] ?>&amp;from=<?= date('Y-m-d', strtotime("-$back days")) ?>&amp;to=<?= date('Y-m-d') ?>">Last <?= $lbl ?></a>
+        <?php endforeach; ?>
+    </div>
+</form>
+
+<?php if (!$rep['att_ok']): ?>
+<div class="wsr-warn"><i class="bi bi-info-circle me-1"></i>TeamLogger activity could not be read, so only tracked task time is shown.</div>
+<?php elseif ($r_act <= 0): ?>
+<div class="wsr-warn"><i class="bi bi-info-circle me-1"></i>No TeamLogger activity is synced for this range, so there is nothing to compare against. Sync it from the TeamLogger page.</div>
+<?php endif; ?>
+
+<?php if ($rep['auto']): ?>
+<div class="wsr-warn">
+    <i class="bi bi-exclamation-triangle me-1"></i>
+    Some sessions below were closed automatically after running 12 hours — a card was left in In&nbsp;Progress. Those durations are a ceiling, not measured work.
+</div>
+<?php endif; ?>
+
+<div class="wsr-tiles">
+    <div class="wsr-tile accent">
+        <div class="v"><?= fmt_hm($r_cov) ?></div>
+        <div class="l">Time on tasks</div>
+        <div class="s">Wall clock with at least one task running</div>
+    </div>
+    <div class="wsr-tile">
+        <div class="v"><?= fmt_hm($r_trk) ?></div>
+        <div class="l">Sum per task</div>
+        <div class="s"><?= $r_trk > $r_cov ? 'Higher — overlapping tasks each counted in full' : 'No overlapping tasks' ?></div>
+    </div>
+    <div class="wsr-tile">
+        <div class="v"><?= $rep['att_ok'] && $r_act > 0 ? fmt_hm((int)$r_act) : '—' ?></div>
+        <div class="l">TeamLogger active</div>
+        <div class="s">Measured activity for the same days</div>
+    </div>
+    <div class="wsr-tile">
+        <div class="v"><?= $r_pct === null ? '—' : $r_pct . '%' ?></div>
+        <div class="l">Accounted for</div>
+        <div class="s">Active time explained by a task</div>
+    </div>
+</div>
+
+<div class="wsr-card">
+    <h6>Day by day</h6>
+    <canvas id="wsrChart" height="110"></canvas>
+</div>
+
+<div class="wsr-card">
+    <h6>Where the time went</h6>
+    <?php if (!$rep['sum']['tasks']): ?>
+    <div class="wsr-muted">Nothing was tracked in this range.</div>
+    <?php else: ?>
+    <table class="wsr-table">
+        <thead><tr><th>Task</th><th class="num">Tracked</th><th class="num">Share</th></tr></thead>
+        <tbody>
+        <?php foreach ($rep['sum']['tasks'] as $tid => $secs): ?>
+            <tr>
+                <td>
+                    <a href="task_detail.php?id=<?= (int)$tid ?>"><?= sanitize($rep['titles'][$tid] ?? ('Task #' . $tid)) ?></a>
+                    <?php if (isset($rep['auto'][$tid])): ?>
+                    <i class="bi bi-exclamation-triangle-fill ms-1" style="color:#f59e0b;font-size:.72rem;" title="Includes an auto-closed session"></i>
+                    <?php endif; ?>
+                </td>
+                <td class="num"><?= fmt_hm($secs) ?></td>
+                <td class="num"><?= $r_trk > 0 ? round($secs / $r_trk * 100) . '%' : '—' ?></td>
+            </tr>
+        <?php endforeach; ?>
+        </tbody>
+    </table>
+    <?php endif; ?>
+</div>
+
+<div class="wsr-card">
+    <h6>Daily detail</h6>
+    <table class="wsr-table">
+        <thead><tr>
+            <th>Date</th><th class="num">On tasks</th><th class="num">TL active</th>
+            <th class="num">TL idle</th><th class="num">Accounted</th>
+        </tr></thead>
+        <tbody>
+        <?php foreach ($rep['days'] as $d):
+            $day  = $rep['sum']['days'][$d] ?? null;
+            $cov  = $day['covered'] ?? 0;
+            $ah   = (float)($rep['att'][$d]['ah'] ?? 0);
+            $pc   = $ah > 0 ? min(999, round($cov / ($ah * 3600) * 100)) : null;
+        ?>
+            <tr>
+                <td><?= date('D d M', strtotime($d)) ?></td>
+                <td class="num"><?= fmt_hm($cov) ?></td>
+                <td class="num"><?= $ah > 0 ? fmt_hm((int)round($ah * 3600)) : '—' ?></td>
+                <td class="num"><?= !empty($rep['att'][$d]['ih']) ? fmt_hm((int)round((float)$rep['att'][$d]['ih'] * 3600)) : '—' ?></td>
+                <td class="num"><?= $pc === null ? '—' : $pc . '%' ?></td>
+            </tr>
+        <?php endforeach; ?>
+        </tbody>
+    </table>
+</div>
+
+</div>
+
+<script>
+// Chart.js is loaded by footer.php, i.e. after this markup, so defer until parsing is done.
+document.addEventListener('DOMContentLoaded', function () {
+    var el = document.getElementById('wsrChart');
+    if (!el || typeof Chart === 'undefined') return;
+    new Chart(el, {
+        type: 'bar',
+        data: {
+            labels: <?= json_encode(array_map(fn($d) => date('D d', strtotime($d)), $rep['days'])) ?>,
+            datasets: [
+                {
+                    label: 'On tasks',
+                    data: <?= json_encode(array_map(fn($d) => round(($rep['sum']['days'][$d]['covered'] ?? 0) / 3600, 2), $rep['days'])) ?>,
+                    backgroundColor: '#3b82f6', borderRadius: 4
+                },
+                {
+                    label: 'TeamLogger active',
+                    data: <?= json_encode(array_map(fn($d) => round((float)($rep['att'][$d]['ah'] ?? 0), 2), $rep['days'])) ?>,
+                    backgroundColor: 'rgba(148,163,184,.55)', borderRadius: 4
+                }
+            ]
+        },
+        options: {
+            responsive: true, maintainAspectRatio: true,
+            scales: { y: { beginAtZero: true, ticks: { callback: function (v) { return v + 'h'; } } } },
+            plugins: { legend: { position: 'bottom', labels: { boxWidth: 12, font: { size: 11 } } } }
+        }
+    });
+});
+</script>
+
+<?php endif; ?>
+
 
 <!-- ── TAB: TASKS ─────────────────────────────────────── -->
 <?php if ($tab === 'my'): ?>
