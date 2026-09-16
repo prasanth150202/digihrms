@@ -114,6 +114,72 @@ if ($api_key !== '') {
     }
 }
 
+// ── 3b. Side-by-side mapping: every TeamLogger person vs HRMS ──
+// This is the table that actually explains an unlinked sync: it shows, per person, which
+// of the three keys the sync tries (tl_guid, emp_no, email) succeeds or fails.
+$map_rows = [];
+if ($api_key !== '' && !empty($entries)) {
+    $hu = $conn->query("SELECT id, name, email, emp_no, tl_guid FROM users")->fetchAll();
+    $by_guid = $by_code = $by_email = $by_name = [];
+    foreach ($hu as $h) {
+        if (!empty($h['tl_guid'])) $by_guid[$h['tl_guid']]                      = $h;
+        if (!empty($h['emp_no']))  $by_code[strtoupper(trim($h['emp_no']))]     = $h;
+        if (!empty($h['email']))   $by_email[strtolower(trim($h['email']))]     = $h;
+        if (!empty($h['name']))    $by_name[strtolower(trim($h['name']))]       = $h;
+    }
+
+    $guid_by_code = $guid_by_email = $email_by_code = $email_by_guid = [];
+    if (!isset($users['error'])) {
+        foreach ($ulist as $tu) {
+            $c = strtoupper(trim($tu['employeeCode'] ?? $tu['empCode'] ?? $tu['code'] ?? $tu['employeeId'] ?? ''));
+            $e = strtolower(trim($tu['email'] ?? $tu['employeeEmail'] ?? ''));
+            $g = $tu['guid'] ?? $tu['id'] ?? $tu['userId'] ?? '';
+            if ($c && $g) $guid_by_code[$c]  = $g;
+            if ($e && $g) $guid_by_email[$e] = $g;
+            if ($c && $e) $email_by_code[$c] = $e;
+            if ($g && $e) $email_by_guid[$g] = $e;
+        }
+    }
+
+    foreach ($entries as $e) {
+        $code  = strtoupper(trim($e['employeeCode'] ?? $e['empCode'] ?? $e['code'] ?? $e['employeeId'] ?? ''));
+        $email = strtolower(trim($e['employeeEmail'] ?? $e['email'] ?? ''));
+        $name  = trim($e['employeeName'] ?? $e['name'] ?? $e['fullName'] ?? $e['username'] ?? '');
+        $guid  = ($code ? ($guid_by_code[$code] ?? null) : null) ?? ($email ? ($guid_by_email[$email] ?? null) : null);
+
+        // The punch report often has no email — the roster usually does.
+        $roster_email = ($code && isset($email_by_code[$code])) ? $email_by_code[$code]
+                      : (($guid && isset($email_by_guid[$guid])) ? $email_by_guid[$guid] : '');
+        $use_email = $email ?: $roster_email;
+
+        $hit = null; $via = '';
+        if ($guid  && isset($by_guid[$guid]))   { $hit = $by_guid[$guid];   $via = 'tl_guid'; }
+        if (!$hit && $code  && isset($by_code[$code]))   { $hit = $by_code[$code];   $via = 'emp_no'; }
+        if (!$hit && $use_email && isset($by_email[$use_email])) {
+            $hit = $by_email[$use_email];
+            $via = $email ? 'email' : 'roster email';
+        }
+
+        $hint = '';
+        if (!$hit) {
+            if ($name && isset($by_name[strtolower($name)])) {
+                $n = $by_name[strtolower($name)];
+                $hint = 'Same name in HRMS: ' . $n['name'] . ' (id ' . $n['id'] . ', ' . ($n['email'] ?: 'no email') . ')';
+            } elseif ($use_email) {
+                $local = strstr($use_email, '@', true);
+                foreach ($by_email as $he => $h) {
+                    if ($local && strstr($he, '@', true) === $local) {
+                        $hint = 'Same mailbox, different domain: ' . $h['name'] . ' <' . $he . '>';
+                        break;
+                    }
+                }
+            }
+            if (!$hint) $hint = 'No HRMS user resembles this person.';
+        }
+        $map_rows[] = compact('code', 'name', 'email', 'roster_email', 'guid', 'hit', 'via', 'hint');
+    }
+}
+
 // ── 4. What actually landed in the DB ─────────────────────
 $from = date('Y-m-d', strtotime($date . ' -6 days'));
 $a1 = $conn->prepare("SELECT COUNT(*) FROM attendance WHERE date=? AND source='TEAMLOGGER'");
@@ -169,6 +235,31 @@ say($rows, "Your own rows, $from → $date", count($mineRows) > 0,
     </tr>
     <?php endforeach; ?>
 </table>
+
+<?php if ($map_rows):
+    $unmatched = array_filter($map_rows, fn($r) => !$r['hit']);
+?>
+<h1 style="font-size:16px;margin:0 0 4px;">Who TeamLogger sent vs who HRMS knows</h1>
+<div class="sub">
+    <?= count($map_rows) - count($unmatched) ?> matched, <strong><?= count($unmatched) ?> unmatched</strong>.
+    The sync tries <code>tl_guid</code>, then <code>emp_no</code>, then <code>email</code> — unmatched rows are
+    stored with <code>user_id NULL</code> and are invisible to every report.
+</div>
+<table>
+    <tr><th>TL code</th><th>TL name</th><th>Email on punch row</th><th>Email on roster</th><th>Matched?</th><th>HRMS user</th><th>What to fix</th></tr>
+    <?php foreach ($map_rows as $r): ?>
+    <tr>
+        <td><code><?= htmlspecialchars($r['code'] ?: '—') ?></code></td>
+        <td><?= htmlspecialchars($r['name'] ?: '—') ?></td>
+        <td><?= $r['email'] ? htmlspecialchars($r['email']) : '<span class="bad">missing</span>' ?></td>
+        <td><?= htmlspecialchars($r['roster_email'] ?: '—') ?></td>
+        <td class="<?= $r['hit'] ? 'ok' : 'bad' ?>"><?= $r['hit'] ? 'via ' . $r['via'] : 'NO' ?></td>
+        <td><?= $r['hit'] ? htmlspecialchars($r['hit']['name'] . ' (id ' . $r['hit']['id'] . ')') : '—' ?></td>
+        <td><?= $r['hit'] ? '' : htmlspecialchars($r['hint']) ?></td>
+    </tr>
+    <?php endforeach; ?>
+</table>
+<?php endif; ?>
 
 <?php if ($mineRows): ?>
 <table>

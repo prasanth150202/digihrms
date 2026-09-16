@@ -111,12 +111,19 @@ $raw_users    = tl_api_sd('/api/integration/list_users', $api_key);
 $tl_users     = isset($raw_users[0]) ? $raw_users : ($raw_users['users'] ?? $raw_users['data'] ?? []);
 $guid_by_code  = [];
 $guid_by_email = [];
+// The punch report frequently omits the email address that this roster does carry, which
+// left the email fallback in $get_user with nothing to match on. Keep the roster's address
+// so it can be backfilled onto each punch row below.
+$email_by_code = [];
+$email_by_guid = [];
 foreach ($tl_users as $tu) {
     $c = strtoupper(trim($tu['employeeCode'] ?? $tu['empCode'] ?? $tu['code'] ?? $tu['employeeId'] ?? ''));
     $e = strtolower(trim($tu['email'] ?? $tu['employeeEmail'] ?? ''));
     $g = $tu['guid'] ?? $tu['id'] ?? $tu['userId'] ?? '';
     if ($c && $g) $guid_by_code[$c]  = $g;
     if ($e && $g) $guid_by_email[$e] = $g;
+    if ($c && $e) $email_by_code[$c] = $e;
+    if ($g && $e) $email_by_guid[$g] = $e;
 }
 
 // ── 3. Fetch timesheet for each employee in parallel ─────
@@ -233,6 +240,12 @@ foreach ($entries as $row) {
     $ec2       = strtoupper(trim($row['employeeCode'] ?? $row['empCode'] ?? $row['code'] ?? $row['employeeId'] ?? ''));
     $em2       = strtolower(trim($row['employeeEmail'] ?? $row['email'] ?? ''));
     $guid      = ($ec2 ? ($guid_by_code[$ec2] ?? null) : null) ?? ($em2 ? ($guid_by_email[$em2] ?? null) : null);
+    // Punch rows often have no email; take it from the roster so matching has something to
+    // work with when emp_no is unset in HRMS, which is the usual case.
+    if ($email === '') {
+        $email = ($ec2 && isset($email_by_code[$ec2])) ? $email_by_code[$ec2]
+               : (($guid && isset($email_by_guid[$guid])) ? $email_by_guid[$guid] : '');
+    }
     $totals    = $guid ? ($seg_totals[$guid] ?? null) : null;
     $idle_h    = $totals && $totals['idle']    > 0 ? (string)round($totals['idle'],    4) : null;
     $meeting_h = $totals && $totals['meeting'] > 0 ? (string)round($totals['meeting'], 4) : null;
