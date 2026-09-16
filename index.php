@@ -6,6 +6,14 @@ $pageTitle = 'Dashboard';
 $u    = current_user();
 $role = $u['role'];
 
+// Workspace-beta users land on the kanban board instead of the classic dashboard.
+// Wrapped defensively so a not-yet-migrated column can never break the app's front door.
+try {
+    $wbi = $conn->prepare("SELECT workspace_beta FROM users WHERE id=?");
+    $wbi->execute([$u['id']]);
+    if ((bool)$wbi->fetchColumn()) { header('Location: workspace.php'); exit; }
+} catch (Exception $e) { /* migration not run yet — ignore */ }
+
 // ══════════════════════════════════════════════════════════
 //  EMPLOYEE / TEAM_LEAD / INTERVIEW_PANEL  — personal home
 // ══════════════════════════════════════════════════════════

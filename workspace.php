@@ -110,6 +110,7 @@ foreach (['REWORK', 'BLOCKED'] as $optional) {
 }
 
 $priority_color = ['URGENT' => '#ef4444', 'HIGH' => '#f59e0b', 'MEDIUM' => '#3b82f6', 'LOW' => '#94a3b8'];
+$is_tl = in_array($u['role'], ['SUPER_ADMIN', 'TEAM_LEAD', 'DEPT_MANAGER']);
 
 include 'header.php';
 ?>
@@ -117,8 +118,11 @@ include 'header.php';
 <div class="d-flex justify-content-between align-items-center mb-4">
     <div>
         <h5 class="fw-bold mb-0"><i class="bi bi-kanban me-2"></i>Workspace</h5>
-        <div class="text-muted small">Click Focus to start working on a task — it moves to In Progress and starts the timer.</div>
+        <div class="text-muted small">Click Focus to start working on a task — it moves to In Progress and starts the timer. Click a card for full details, comments and approvals.</div>
     </div>
+    <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#newTaskModal">
+        <i class="bi bi-plus-lg me-1"></i>New Task
+    </button>
 </div>
 
 <div class="d-flex gap-3 pb-3" style="overflow-x:auto;">
@@ -136,10 +140,17 @@ include 'header.php';
                         <?= sanitize($t['priority']) ?>
                     </span>
                     <?php endif; ?>
-                    <div class="fw-semibold small mb-1"><?= sanitize($t['title']) ?></div>
+                    <div class="fw-semibold small mb-1">
+                        <a href="task_detail.php?id=<?= (int)$t['id'] ?>" class="text-dark text-decoration-none">
+                            <?= sanitize($t['title']) ?>
+                        </a>
+                    </div>
                     <?php if ($t['project_name']): ?>
                     <div class="text-muted small mb-2"><?= sanitize($t['project_name']) ?></div>
                     <?php endif; ?>
+                    <a href="task_detail.php?id=<?= (int)$t['id'] ?>" class="small text-muted d-block mb-2">
+                        <i class="bi bi-chat-left-text me-1"></i>Details &amp; comments
+                    </a>
 
                     <?php if ($status === 'DONE'): ?>
                         <!-- No timer controls on completed tasks -->
@@ -190,6 +201,84 @@ include 'header.php';
     tick();
     setInterval(tick, 1000);
 })();
+</script>
+
+<!-- ── New Task modal — posts to the existing tasks.php create action (AJAX), then reloads here ── -->
+<div class="modal fade" id="newTaskModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content" style="border-radius:14px;">
+            <form id="newTaskForm">
+                <div class="modal-header border-0">
+                    <h6 class="modal-title fw-bold">New Task</h6>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body d-flex flex-column gap-3">
+                    <div id="newTaskError" class="alert alert-danger py-2 small d-none"></div>
+                    <div>
+                        <label class="form-label small fw-semibold">Title</label>
+                        <input type="text" name="title" class="form-control form-control-sm" required>
+                    </div>
+                    <div>
+                        <label class="form-label small fw-semibold">Description</label>
+                        <textarea name="description" class="form-control form-control-sm" rows="2"></textarea>
+                    </div>
+                    <div class="row g-2">
+                        <div class="col-6">
+                            <label class="form-label small fw-semibold">Priority</label>
+                            <select name="priority" class="form-select form-select-sm">
+                                <option value="MEDIUM" selected>Medium</option>
+                                <option value="URGENT">Urgent</option>
+                                <option value="HIGH">High</option>
+                                <option value="LOW">Low</option>
+                            </select>
+                        </div>
+                        <div class="col-6">
+                            <label class="form-label small fw-semibold">Due date</label>
+                            <input type="date" name="due_date" class="form-control form-control-sm">
+                        </div>
+                    </div>
+                    <?php if (!$is_tl): ?>
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" name="needs_approval" id="newTaskApproval" value="1">
+                        <label class="form-check-label small" for="newTaskApproval">Send to my TL for approval</label>
+                    </div>
+                    <?php endif; ?>
+                </div>
+                <div class="modal-footer border-0">
+                    <button type="button" class="btn btn-light btn-sm" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-primary btn-sm">Create</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<script>
+document.getElementById('newTaskForm').addEventListener('submit', function(e) {
+    e.preventDefault();
+    var errBox = document.getElementById('newTaskError');
+    errBox.classList.add('d-none');
+    var fd = new FormData(this);
+    fd.set('action', <?= $is_tl ? "'create_task'" : "'create_own_task'" ?>);
+    <?php if ($is_tl): ?>
+    fd.set('assigned_to', '<?= $uid ?>'); // TLs land here to work their own tasks too — self-assign
+    <?php endif; ?>
+    fd.set('_ajax', '1');
+    fetch('tasks.php', { method: 'POST', body: fd, credentials: 'same-origin' })
+        .then(function(r) { return r.json().catch(function() { throw new Error('Unexpected response'); }); })
+        .then(function(data) {
+            if (data && data.ok) {
+                window.location.href = 'workspace.php';
+            } else {
+                errBox.textContent = (data && data.error) ? data.error : 'Could not create task.';
+                errBox.classList.remove('d-none');
+            }
+        })
+        .catch(function() {
+            errBox.textContent = 'Could not create task — please try again.';
+            errBox.classList.remove('d-none');
+        });
+});
 </script>
 
 <?php include 'footer.php'; ?>
