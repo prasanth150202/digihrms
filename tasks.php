@@ -918,11 +918,22 @@ if ($workspace_beta && ($tab === 'report' || isset($_GET['export']))) {
         $rep_days[] = date('Y-m-d', $d);
     }
 
+    // Total worked is TeamLogger's own figure from the punch report. That field is absent
+    // from some API responses, in which case the sync stores NULL while still recording the
+    // segment breakdown — so rebuild it from the parts rather than showing a blank day.
     $rep_active_total = 0.0;
     $rep_worked_total = 0.0;
+    $rep_worked = [];
     foreach ($rep_days as $d) {
         $rep_active_total += (float)($rep_att[$d]['ah'] ?? 0);
-        $rep_worked_total += (float)($rep_att[$d]['th'] ?? 0);
+
+        $w = (float)($rep_att[$d]['th'] ?? 0);
+        if ($w <= 0) {
+            $w = (float)($rep_att[$d]['ah'] ?? 0) + (float)($rep_att[$d]['ih'] ?? 0)
+               + (float)($rep_att[$d]['bh'] ?? 0) + (float)($rep_att[$d]['mh'] ?? 0);
+        }
+        $rep_worked[$d]    = $w;
+        $rep_worked_total += $w;
     }
 
     $rep = [
@@ -931,7 +942,7 @@ if ($workspace_beta && ($tab === 'report' || isset($_GET['export']))) {
         'titles' => $rep_titles, 'auto' => $rep_auto,
         'projects' => $rep_projects, 'proj_name' => $rep_proj_name, 'task_proj' => $rep_task_proj,
         'att' => $rep_att, 'att_ok' => $rep_att_ok, 'active_total' => $rep_active_total,
-        'worked_total' => $rep_worked_total,
+        'worked_total' => $rep_worked_total, 'worked' => $rep_worked,
     ];
 
     // CSV export — must finish before header.php emits any markup.
@@ -942,11 +953,13 @@ if ($workspace_beta && ($tab === 'report' || isset($_GET['export']))) {
         header('Content-Disposition: attachment; filename="task_time_' . $rep_from . '_to_' . $rep_to . '.csv"');
         $out = fopen('php://output', 'w');
         fputcsv($out, ['Person', 'Date', 'Project', 'Task', 'Tracked hours', 'Day covered hours',
-                       'TeamLogger active', 'TeamLogger idle', 'TeamLogger meeting', 'Auto-closed']);
+                       'TeamLogger worked', 'TeamLogger active', 'TeamLogger idle',
+                       'TeamLogger meeting', 'Auto-closed']);
         foreach ($rep_days as $d) {
             $day = $rep_sum['days'][$d] ?? null;
             if (!$day || !$day['tasks']) {
                 fputcsv($out, [$who, $d, '', '(nothing tracked)', '0.00', '0.00',
+                    number_format((float)($rep_worked[$d] ?? 0), 2, '.', ''),
                     number_format((float)($rep_att[$d]['ah'] ?? 0), 2, '.', ''),
                     number_format((float)($rep_att[$d]['ih'] ?? 0), 2, '.', ''),
                     number_format((float)($rep_att[$d]['mh'] ?? 0), 2, '.', ''), '']);
@@ -959,6 +972,7 @@ if ($workspace_beta && ($tab === 'report' || isset($_GET['export']))) {
                     $rep_titles[$tid] ?? ('Task #' . $tid),
                     number_format($secs / 3600, 2, '.', ''),
                     number_format($day['covered'] / 3600, 2, '.', ''),
+                    number_format((float)($rep_worked[$d] ?? 0), 2, '.', ''),
                     number_format((float)($rep_att[$d]['ah'] ?? 0), 2, '.', ''),
                     number_format((float)($rep_att[$d]['ih'] ?? 0), 2, '.', ''),
                     number_format((float)($rep_att[$d]['mh'] ?? 0), 2, '.', ''),
@@ -2076,7 +2090,7 @@ if (!empty($flash)): ?>
     <div class="wsr-tile">
         <div class="v"><?= $rep['att_ok'] && $r_wrk > 0 ? fmt_hm((int)$r_wrk) : '—' ?></div>
         <div class="l">Total worked</div>
-        <div class="s">TeamLogger hours logged, active and idle</div>
+        <div class="s">From TeamLogger — the full logged day</div>
     </div>
     <div class="wsr-tile accent">
         <div class="v"><?= fmt_hm($r_cov) ?></div>
@@ -2159,21 +2173,23 @@ if (!empty($flash)): ?>
     <h6>Daily detail</h6>
     <table class="wsr-table">
         <thead><tr>
-            <th>Date</th><th class="num">On tasks</th><th class="num">TL active</th>
-            <th class="num">TL idle</th><th class="num">Accounted</th>
+            <th>Date</th><th class="num">Worked</th><th class="num">TL active</th>
+            <th class="num">TL idle</th><th class="num">On tasks</th><th class="num">Accounted</th>
         </tr></thead>
         <tbody>
         <?php foreach ($rep['days'] as $d):
             $day  = $rep['sum']['days'][$d] ?? null;
             $cov  = $day['covered'] ?? 0;
             $ah   = (float)($rep['att'][$d]['ah'] ?? 0);
+            $wk   = (float)($rep['worked'][$d] ?? 0);
             $pc   = $ah > 0 ? min(999, round($cov / ($ah * 3600) * 100)) : null;
         ?>
             <tr>
                 <td><?= date('D d M', strtotime($d)) ?></td>
-                <td class="num"><?= fmt_hm($cov) ?></td>
+                <td class="num"><?= $wk > 0 ? fmt_hm((int)round($wk * 3600)) : '—' ?></td>
                 <td class="num"><?= $ah > 0 ? fmt_hm((int)round($ah * 3600)) : '—' ?></td>
                 <td class="num"><?= !empty($rep['att'][$d]['ih']) ? fmt_hm((int)round((float)$rep['att'][$d]['ih'] * 3600)) : '—' ?></td>
+                <td class="num"><?= fmt_hm($cov) ?></td>
                 <td class="num"><?= $pc === null ? '—' : $pc . '%' ?></td>
             </tr>
         <?php endforeach; ?>
