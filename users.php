@@ -91,6 +91,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $conn->prepare("UPDATE users SET can_view_all_learning=? WHERE id=?")
                  ->execute([isset($_POST['can_view_all_learning']) ? 1 : 0, $id]);
         } catch (Exception $e) { /* migration not run yet */ }
+        // Workspace beta access (column added by migrate_workspace_beta.php)
+        try {
+            $conn->prepare("UPDATE users SET workspace_beta=? WHERE id=?")
+                 ->execute([isset($_POST['workspace_beta']) ? 1 : 0, $id]);
+        } catch (Exception $e) { /* migration not run yet */ }
         set_flash('success', 'User updated.');
         header("Location: users.php"); exit;
     }
@@ -539,6 +544,17 @@ function copyInviteLink() {
                             </label>
                         </div>
                     </div>
+                    <div class="col-12">
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" name="workspace_beta" id="edit_workspace_beta" value="1">
+                            <label class="form-check-label small" for="edit_workspace_beta">
+                                <i class="bi bi-kanban text-primary me-1"></i>Workspace beta
+                                <span class="text-muted fw-normal d-block" style="font-size:.72rem;">
+                                    Adds a "Workspace" kanban board with a per-task focus timer, for the beta team only.
+                                </span>
+                            </label>
+                        </div>
+                    </div>
                 </div>
             </div>
             <div class="modal-footer border-0 px-4 pb-4 pt-2">
@@ -558,6 +574,7 @@ function openEdit(u) {
     document.getElementById('edit_emp_no').value = u.emp_no || '';
     document.getElementById('edit_is_beta').checked = u.is_beta_tester == 1;
     document.getElementById('edit_can_view_learning').checked = u.can_view_all_learning == 1;
+    document.getElementById('edit_workspace_beta').checked = u.workspace_beta == 1;
     new bootstrap.Modal(document.getElementById('editModal')).show();
 }
 
