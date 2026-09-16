@@ -134,43 +134,6 @@ if ($is_ajax && empty($_POST['action']) && !empty($_GET['action'])) {
 // Create task (TL/Admin only)
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 
-    // ── Board tab: focus one task at a time ────────────────
-    // Reuses the same timer + status machinery as 'update_status' below rather than a
-    // parallel tracking mechanism, so time spent has one source of truth.
-    if ($_POST['action'] === 'set_focus') {
-        $tid = (int)($_POST['task_id'] ?? 0);
-        $chk = $conn->prepare("SELECT id, status FROM tasks WHERE id=? AND assigned_to=? AND deleted_at IS NULL");
-        $chk->execute([$tid, $uid]);
-        $task = $chk->fetch();
-
-        if ($task) {
-            $others = $conn->prepare("SELECT id FROM tasks WHERE assigned_to=? AND timer_status='ACTIVE' AND id<>?");
-            $others->execute([$uid, $tid]);
-            foreach ($others->fetchAll() as $o) stop_task_timer($conn, (int)$o['id'], $uid);
-
-            start_task_timer($conn, $tid, $uid);
-
-            if ($task['status'] === 'TODO') {
-                $conn->prepare("UPDATE tasks SET status='IN_PROGRESS', updated_at=NOW() WHERE id=?")->execute([$tid]);
-                $conn->prepare("INSERT INTO task_comments (task_id,user_id,comment) VALUES (?,?,?)")
-                     ->execute([$tid, $uid, "Stage moved: TODO → IN_PROGRESS"]);
-                log_task_activity($conn, $tid, $uid, 'STATUS_CHANGED', 'TODO → IN_PROGRESS');
-                _digiops_task_sync($conn, $tid, 'IN_PROGRESS');
-            }
-        }
-        if ($is_ajax) ajax_ok();
-        header('Location: tasks.php?tab=board'); exit;
-    }
-
-    if ($_POST['action'] === 'clear_focus') {
-        $tid = (int)($_POST['task_id'] ?? 0);
-        $chk = $conn->prepare("SELECT id FROM tasks WHERE id=? AND assigned_to=?");
-        $chk->execute([$tid, $uid]);
-        if ($chk->fetch()) stop_task_timer($conn, $tid, $uid);
-        if ($is_ajax) ajax_ok();
-        header('Location: tasks.php?tab=board'); exit;
-    }
-
     // Employee (or HR) creates a task for themselves
     if ($_POST['action'] === 'create_own_task' && !$is_tl) {
         $needs_appr = isset($_POST['needs_approval']) ? 1 : 0;
@@ -839,18 +802,34 @@ if ($role === 'SUPER_ADMIN' || $role === 'DEPT_MANAGER') {
 
 // ── BOARD TAB DATA (beta Workspace) ──────────────────────
 // The board is personal even for a TL, whose $my_tasks also carries their team's work.
-$focus_task_id = null;
-$focus_started_at = null;
-$board_tasks = [];
+// Elapsed time is measured by MySQL rather than shipping a datetime for the browser to
+// parse: the DB server, PHP and the viewer's browser can each sit in a different zone.
+$board_tasks   = [];
+$board_running = []; // task_id => seconds elapsed on its running timer
 if ($workspace_beta) {
-    $af = $conn->prepare("SELECT id, timer_started_at FROM tasks WHERE assigned_to=? AND timer_status='ACTIVE' AND deleted_at IS NULL LIMIT 1");
-    $af->execute([$uid]);
-    if ($afr = $af->fetch()) {
-        $focus_task_id    = (int)$afr['id'];
-        $focus_started_at = $afr['timer_started_at'];
-    }
     $board_tasks = array_values(array_filter($my_tasks, fn($t) => (int)$t['assigned_to'] === (int)$uid));
+
+    $af = $conn->prepare("SELECT id, TIMESTAMPDIFF(SECOND, timer_started_at, NOW()) AS elapsed
+        FROM tasks
+        WHERE assigned_to=? AND timer_status='ACTIVE' AND timer_started_at IS NOT NULL AND deleted_at IS NULL");
+    $af->execute([$uid]);
+    foreach ($af->fetchAll() as $r) $board_running[(int)$r['id']] = max(0, (int)$r['elapsed']);
 }
+
+// Quiz-passed task IDs for the current user. Both kanbans render this onto their cards,
+// so it has to resolve before either tab does — the drag handler blocks a DONE drop on a
+// learning task whose quiz shows as unpassed.
+$quiz_passed_task_ids = [];
+try {
+    $kEmpQ = $conn->prepare("SELECT e.id FROM employees e JOIN users u ON u.email=e.email WHERE u.id=? LIMIT 1");
+    $kEmpQ->execute([$uid]);
+    $kEmpId = (int)($kEmpQ->fetchColumn() ?: 0);
+    if ($kEmpId) {
+        $kQpQ = $conn->prepare("SELECT DISTINCT task_id FROM hrms_task_quiz_attempts WHERE employee_id=? AND passed=1");
+        $kQpQ->execute([$kEmpId]);
+        $quiz_passed_task_ids = array_column($kQpQ->fetchAll(), 'task_id');
+    }
+} catch (PDOException $e) {}
 
 // Incoming requests (TL only)
 $incoming = [];
@@ -1626,15 +1605,15 @@ if (!empty($flash)): ?>
 <!-- ── TAB: BOARD (beta Workspace) ─────────────────────── -->
 <?php if ($tab === 'board'):
     $board_cols = [
-        'TODO'        => 'To Do',
-        'IN_PROGRESS' => 'In Progress',
-        'REWORK'      => 'Rework',
-        'BLOCKED'     => 'Blocked',
-        'REVIEW'      => 'Review',
-        'DONE'        => 'Done',
+        'TODO'        => ['label' => 'To Do',       'dot' => 'var(--tm-todo)'],
+        'IN_PROGRESS' => ['label' => 'In Progress', 'dot' => 'var(--tm-prog)'],
+        'REWORK'      => ['label' => 'Rework',      'dot' => '#f97316'],
+        'BLOCKED'     => ['label' => 'Blocked',     'dot' => '#ef4444'],
+        'REVIEW'      => ['label' => 'Review',      'dot' => 'var(--tm-review)'],
+        'DONE'        => ['label' => 'Done',        'dot' => 'var(--tm-done)'],
     ];
     $board = [];
-    foreach ($board_cols as $k => $label) $board[$k] = ['label' => $label, 'items' => []];
+    foreach ($board_cols as $k => $meta) $board[$k] = $meta + ['items' => []];
     foreach ($board_tasks as $t) {
         if (isset($board[$t['status']])) $board[$t['status']]['items'][] = $t;
     }
@@ -1642,88 +1621,219 @@ if (!empty($flash)): ?>
     foreach (['REWORK','BLOCKED'] as $optional) {
         if (empty($board[$optional]['items'])) unset($board[$optional]);
     }
-    $board_pri = ['URGENT'=>'#ef4444','HIGH'=>'#f59e0b','MEDIUM'=>'#3b82f6','LOW'=>'#94a3b8'];
+    $today = date('Y-m-d');
 ?>
 
-<div class="text-muted mb-3" style="font-size:.82rem;">
-    <i class="bi bi-record-circle me-1"></i>Focus a task to start its timer — it moves to In Progress automatically. Only one task can be focused at a time.
+<style>
+/* Board-scoped only. The shared .kanban-* rules hardcode #fff/#f8fafc and are unreadable
+   in dark mode, so this board drives every surface off the theme tokens instead. */
+.wsb-board {
+    --wsb-col-bg:#f6f8fb; --wsb-col-bdr:#e6edf5; --wsb-card-bg:#fff;
+    --wsb-shadow:0 1px 2px rgba(15,23,42,.06); --wsb-shadow-h:0 6px 18px rgba(15,23,42,.13);
+    display:flex; gap:14px; overflow-x:auto; align-items:flex-start;
+    padding:2px 2px 16px; font-family:var(--font);
+}
+[data-theme="dark"] .wsb-board {
+    --wsb-col-bg:rgba(255,255,255,.035); --wsb-col-bdr:rgba(255,255,255,.08); --wsb-card-bg:#151d2e;
+    --wsb-shadow:0 1px 2px rgba(0,0,0,.45); --wsb-shadow-h:0 6px 18px rgba(0,0,0,.55);
+}
+.wsb-col {
+    flex:0 0 286px; width:286px; background:var(--wsb-col-bg);
+    border:1px solid var(--wsb-col-bdr); border-radius:14px; padding:12px 12px 14px;
+    transition:background .15s, border-color .15s;
+}
+.wsb-col.drop-active { background:var(--primary-bg); border-color:var(--primary-bdr); }
+[data-theme="dark"] .wsb-col.drop-active { background:rgba(59,130,246,.14); border-color:rgba(59,130,246,.45); }
+.wsb-col-hd { display:flex; align-items:center; justify-content:space-between; margin-bottom:11px; padding:0 2px; }
+.wsb-col-title { display:flex; align-items:center; gap:7px; font-size:.78rem; font-weight:700;
+    letter-spacing:.02em; color:var(--text-secondary); }
+.wsb-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
+.wsb-count { min-width:22px; text-align:center; background:var(--wsb-col-bdr);
+    color:var(--text-secondary); border-radius:20px; padding:1px 8px; font-size:.7rem; font-weight:700; }
+.wsb-cards { display:flex; flex-direction:column; gap:8px; min-height:52px; }
+
+.wsb-card {
+    position:relative; background:var(--wsb-card-bg); border:1px solid var(--wsb-col-bdr);
+    border-radius:var(--r,10px); padding:11px 13px 12px; box-shadow:var(--wsb-shadow);
+    cursor:grab; transition:box-shadow .15s, transform .12s, border-color .15s;
+}
+.wsb-card:hover { box-shadow:var(--wsb-shadow-h); transform:translateY(-1px); }
+.wsb-card:active { cursor:grabbing; }
+.wsb-card.dragging { opacity:.45; transform:rotate(1.5deg); }
+.wsb-card.not-draggable { cursor:default; opacity:.85; }
+.wsb-card.not-draggable:hover { transform:none; box-shadow:var(--wsb-shadow); }
+
+.wsb-card.is-running { border-color:var(--primary); box-shadow:0 0 0 1px var(--primary), var(--wsb-shadow-h); }
+.wsb-card.is-running::before {
+    content:''; position:absolute; inset:0; border-radius:inherit; pointer-events:none;
+    background:linear-gradient(180deg, rgba(59,130,246,.10), rgba(59,130,246,.02));
+}
+.wsb-card > * { position:relative; }
+
+.wsb-card-top { display:flex; align-items:center; gap:6px; margin-bottom:7px; min-height:18px; }
+.wsb-flag { color:#a78bfa; font-size:.78rem; line-height:1; }
+.wsb-title { display:block; font-size:.83rem; font-weight:600; line-height:1.38;
+    color:var(--text-primary); text-decoration:none; }
+.wsb-title:hover { color:var(--primary); }
+.wsb-meta { display:flex; flex-wrap:wrap; gap:4px 11px; margin-top:7px;
+    font-size:.71rem; color:var(--text-muted); }
+.wsb-meta span { display:inline-flex; align-items:center; gap:4px; }
+.wsb-meta .wsb-overdue { color:#ef4444; font-weight:600; }
+
+.wsb-timer { display:none; align-items:center; gap:7px; margin-top:9px; padding-top:9px;
+    border-top:1px dashed var(--wsb-col-bdr); }
+.wsb-card.is-running .wsb-timer { display:flex; }
+.wsb-pulse { width:7px; height:7px; border-radius:50%; background:var(--primary);
+    box-shadow:0 0 0 0 rgba(59,130,246,.55); animation:wsbPulse 1.8s infinite; }
+@keyframes wsbPulse {
+    70%  { box-shadow:0 0 0 7px rgba(59,130,246,0); }
+    100% { box-shadow:0 0 0 0 rgba(59,130,246,0); }
+}
+.wsb-clock { font-size:.78rem; font-weight:700; color:var(--primary);
+    font-variant-numeric:tabular-nums; letter-spacing:.02em; }
+.wsb-running-lbl { margin-left:auto; font-size:.64rem; font-weight:700; text-transform:uppercase;
+    letter-spacing:.05em; color:var(--text-muted); }
+
+.wsb-empty { text-align:center; color:var(--text-muted); font-size:.75rem; padding:18px 0; opacity:.8; }
+.wsb-hint { display:flex; align-items:center; gap:7px; margin-bottom:14px;
+    font-size:.79rem; color:var(--text-muted); }
+.wsb-board::-webkit-scrollbar { height:7px; }
+.wsb-board::-webkit-scrollbar-thumb { background:var(--wsb-col-bdr); border-radius:4px; }
+
+/* The .pri-* pills are shared, and their light pastels lose contrast on a dark card. */
+[data-theme="dark"] .wsb-board .pri-URGENT { background:#475569; color:#f1f5f9; }
+[data-theme="dark"] .wsb-board .pri-HIGH   { background:rgba(239,68,68,.20); color:#fca5a5; }
+[data-theme="dark"] .wsb-board .pri-MEDIUM { background:rgba(245,158,11,.20); color:#fcd34d; }
+[data-theme="dark"] .wsb-board .pri-LOW    { background:rgba(34,197,94,.20);  color:#86efac; }
+</style>
+
+<div class="wsb-hint">
+    <i class="bi bi-arrows-move"></i>
+    Drag a card between columns to change its stage. Anything in <strong>In&nbsp;Progress</strong> is timed automatically.
 </div>
 
-<div class="d-flex gap-3 pb-3" style="overflow-x:auto;">
-    <?php foreach ($board as $status => $col): ?>
-    <div style="min-width:260px;max-width:260px;flex-shrink:0;">
-        <div class="text-muted small fw-semibold text-uppercase mb-2" style="letter-spacing:.4px;">
-            <?= sanitize($col['label']) ?> <span class="text-muted"><?= count($col['items']) ?></span>
+<div class="kanban-board wsb-board">
+<?php foreach ($board as $status => $col):
+    // BLOCKED is deliberately not a .kanban-col: update_status rejects it server-side, so
+    // making it a drop target would move the card on screen and silently fail to save.
+    $is_locked = $status === 'BLOCKED';
+?>
+    <div class="wsb-col <?= $is_locked ? '' : 'kanban-col' ?>" data-status="<?= $status ?>">
+        <div class="wsb-col-hd">
+            <div class="wsb-col-title">
+                <span class="wsb-dot" style="background:<?= $col['dot'] ?>;"></span>
+                <?= sanitize($col['label']) ?>
+            </div>
+            <span class="wsb-count kanban-count"><?= count($col['items']) ?></span>
         </div>
-        <div class="d-flex flex-column gap-2">
-            <?php foreach ($col['items'] as $t): $is_focused = $focus_task_id === (int)$t['id']; ?>
-            <div class="card border-0 shadow-sm" style="border-radius:12px;<?= $is_focused ? 'outline:2px solid #3b82f6;' : '' ?>">
-                <div class="card-body p-3">
-                    <?php if (!empty($t['priority']) && isset($board_pri[$t['priority']])): ?>
-                    <span class="badge mb-2" style="background:<?= $board_pri[$t['priority']] ?>22;color:<?= $board_pri[$t['priority']] ?>;font-size:.65rem;">
-                        <?= sanitize($t['priority']) ?>
+        <div class="kanban-cards wsb-cards" id="kc-<?= $status ?>">
+            <?php foreach ($col['items'] as $t):
+                $tid      = (int)$t['id'];
+                $can_drag = !$hr_view && !$is_locked;
+                $elapsed  = $board_running[$tid] ?? null;
+                $overdue  = !empty($t['due_date']) && $t['due_date'] < $today && $status !== 'DONE';
+            ?>
+            <div class="kanban-card task-item wsb-card <?= $can_drag ? 'kb-draggable' : 'not-draggable' ?><?= $elapsed !== null ? ' is-running' : '' ?>"
+                 data-task-id="<?= $tid ?>"
+                 data-status="<?= $status ?>"
+                 data-needs-approval="<?= !empty($t['needs_approval']) ? '1' : '0' ?>"
+                 data-is-learning="<?= !empty($t['is_learning_task']) ? '1' : '0' ?>"
+                 data-quiz-required="<?= !empty($t['quiz_required']) ? '1' : '0' ?>"
+                 data-quiz-passed="<?= in_array($t['id'], $quiz_passed_task_ids) ? '1' : '0' ?>"
+                 <?= $can_drag ? 'draggable="true"' : '' ?>>
+                <div class="wsb-card-top">
+                    <?php if (!empty($t['priority'])): ?>
+                    <span class="pri-badge pri-<?= sanitize($t['priority']) ?>"><?= sanitize($t['priority']) ?></span>
+                    <?php endif; ?>
+                    <?php if (!empty($t['needs_approval'])): ?>
+                    <span class="wsb-flag" title="Needs approval before Done"><i class="bi bi-patch-check-fill"></i></span>
+                    <?php endif; ?>
+                    <?php if (!empty($t['is_learning_task'])): ?>
+                    <span class="wsb-flag" title="Learning task" style="color:#22c55e;"><i class="bi bi-mortarboard-fill"></i></span>
+                    <?php endif; ?>
+                </div>
+
+                <a href="task_detail.php?id=<?= $tid ?>" class="wsb-title" draggable="false"><?= sanitize($t['title']) ?></a>
+
+                <div class="wsb-meta">
+                    <?php if (!empty($t['project_name'])): ?>
+                    <span><i class="bi bi-folder2"></i><?= sanitize($t['project_name']) ?></span>
+                    <?php endif; ?>
+                    <?php if (!empty($t['due_date'])): ?>
+                    <span class="<?= $overdue ? 'wsb-overdue' : '' ?>">
+                        <i class="bi bi-calendar3"></i><?= date('d M', strtotime($t['due_date'])) ?>
                     </span>
                     <?php endif; ?>
-                    <div class="fw-semibold small mb-1">
-                        <a href="task_detail.php?id=<?= (int)$t['id'] ?>" class="text-dark text-decoration-none">
-                            <?= sanitize($t['title']) ?>
-                        </a>
-                    </div>
-                    <?php if (!empty($t['project_name'])): ?>
-                    <div class="text-muted small mb-2"><?= sanitize($t['project_name']) ?></div>
-                    <?php endif; ?>
-                    <a href="task_detail.php?id=<?= (int)$t['id'] ?>" class="small text-muted d-block mb-2">
-                        <i class="bi bi-chat-left-text me-1"></i>Details &amp; comments
-                    </a>
+                </div>
 
-                    <?php if ($status === 'DONE'): ?>
-                        <!-- No timer controls on completed tasks -->
-                    <?php elseif ($is_focused): ?>
-                        <div class="small fw-semibold text-primary mb-2">
-                            <i class="bi bi-record-circle-fill me-1"></i>
-                            Focused <span class="focus-timer" data-started="<?= sanitize($focus_started_at) ?>">00:00:00</span>
-                        </div>
-                        <form method="POST">
-                            <input type="hidden" name="action" value="clear_focus">
-                            <input type="hidden" name="task_id" value="<?= (int)$t['id'] ?>">
-                            <button class="btn btn-outline-primary btn-sm w-100">Stop</button>
-                        </form>
-                    <?php else: ?>
-                        <form method="POST">
-                            <input type="hidden" name="action" value="set_focus">
-                            <input type="hidden" name="task_id" value="<?= (int)$t['id'] ?>">
-                            <button class="btn btn-primary btn-sm w-100">
-                                <i class="bi bi-play-fill me-1"></i><?= $focus_task_id ? 'Switch focus' : 'Focus' ?>
-                            </button>
-                        </form>
-                    <?php endif; ?>
+                <div class="wsb-timer" data-elapsed="<?= (int)($elapsed ?? 0) ?>">
+                    <span class="wsb-pulse"></span>
+                    <span class="wsb-clock">00:00:00</span>
+                    <span class="wsb-running-lbl">tracking</span>
                 </div>
             </div>
             <?php endforeach; ?>
             <?php if (!$col['items']): ?>
-            <div class="text-muted small fst-italic px-1">Nothing here.</div>
+            <div class="kanban-empty kb-empty wsb-empty"><i class="bi bi-inbox me-1"></i>No tasks</div>
             <?php endif; ?>
         </div>
     </div>
-    <?php endforeach; ?>
+<?php endforeach; ?>
 </div>
 
 <script>
-(function() {
-    var els = document.querySelectorAll('.focus-timer');
-    if (!els.length) return;
+(function () {
+    var board = document.querySelector('.wsb-board');
+    if (!board) return;
+
+    function clock(sec) {
+        var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+        return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+    }
+
+    // Anchor to a wall-clock instant rather than incrementing a counter, so a backgrounded
+    // tab that stops firing timers still shows the right elapsed time when it returns.
+    function arm(card) {
+        var t = card.querySelector('.wsb-timer');
+        card._t0 = Date.now() - (parseInt(t ? t.dataset.elapsed : 0, 10) || 0) * 1000;
+    }
+
     function tick() {
-        els.forEach(function(el) {
-            var started = new Date(el.dataset.started.replace(' ', 'T'));
-            var diff = Math.max(0, Math.floor((Date.now() - started.getTime()) / 1000));
-            var h = String(Math.floor(diff / 3600)).padStart(2, '0');
-            var m = String(Math.floor((diff % 3600) / 60)).padStart(2, '0');
-            var s = String(diff % 60).padStart(2, '0');
-            el.textContent = h + ':' + m + ':' + s;
+        board.querySelectorAll('.wsb-card.is-running').forEach(function (card) {
+            if (card._t0 === undefined) arm(card);
+            var el = card.querySelector('.wsb-clock');
+            if (el) el.textContent = clock(Math.max(0, Math.floor((Date.now() - card._t0) / 1000)));
         });
     }
+
+    board.querySelectorAll('.wsb-card.is-running').forEach(arm);
     tick();
     setInterval(tick, 1000);
+
+    // Reconcile the timer chips after a drop. The deferral is load-bearing: the shared
+    // _initKanbanDrag() moves the card — or reverts it, when an approval or quiz check
+    // blocks a Done drop — synchronously inside this same event, so only a later read
+    // sees where the card actually settled.
+    board.querySelectorAll('.kanban-col').forEach(function (col) {
+        col.addEventListener('drop', function () {
+            setTimeout(function () {
+                board.querySelectorAll('.wsb-card').forEach(function (card) {
+                    var shouldRun = card.dataset.status === 'IN_PROGRESS';
+                    if (shouldRun === card.classList.contains('is-running')) return;
+                    var t = card.querySelector('.wsb-timer');
+                    if (shouldRun) {
+                        if (t) t.dataset.elapsed = '0';
+                        card.classList.add('is-running');
+                        arm(card);
+                    } else {
+                        card.classList.remove('is-running');
+                        card._t0 = undefined;
+                    }
+                });
+                tick();
+            }, 0);
+        });
+    });
 })();
 </script>
 
@@ -2209,18 +2319,6 @@ $kanban_cols = [
     'DONE'        => ['label'=>'Done',         'dot'=>'#22c55e'],
 ];
 
-// Pre-fetch quiz-passed task IDs for the current user (used on kanban cards)
-$quiz_passed_task_ids = [];
-try {
-    $kEmpQ = $conn->prepare("SELECT e.id FROM employees e JOIN users u ON u.email=e.email WHERE u.id=? LIMIT 1");
-    $kEmpQ->execute([$uid]);
-    $kEmpId = (int)($kEmpQ->fetchColumn() ?: 0);
-    if ($kEmpId) {
-        $kQpQ = $conn->prepare("SELECT DISTINCT task_id FROM hrms_task_quiz_attempts WHERE employee_id=? AND passed=1");
-        $kQpQ->execute([$kEmpId]);
-        $quiz_passed_task_ids = array_column($kQpQ->fetchAll(), 'task_id');
-    }
-} catch (PDOException $e) {}
 ?>
 <div id="viewKanban" style="display:none;">
 <div class="kanban-board" id="kanbanBoard">
