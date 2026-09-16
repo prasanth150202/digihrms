@@ -185,11 +185,19 @@ $conn->prepare("DELETE FROM attendance WHERE date=? AND source='TEAMLOGGER'")->e
 
 // Cache user lookups within this request
 $user_cache = [];
-$get_user = function(string $emp_code, string $email) use ($conn, &$user_cache): ?int {
-    $key = $emp_code . '|' . $email;
+$get_user = function(string $emp_code, string $email, ?string $guid = null) use ($conn, &$user_cache): ?int {
+    $key = $emp_code . '|' . $email . '|' . (string)$guid;
     if (array_key_exists($key, $user_cache)) return $user_cache[$key];
     $uid = null;
-    if ($emp_code) {
+    // tl_guid first: it is the explicit link set by the "map user" screen in teamlogger.php,
+    // so it should win over guessing by code or address.
+    if ($guid) {
+        try {
+            $s = $conn->prepare("SELECT id FROM users WHERE tl_guid=? LIMIT 1");
+            $s->execute([$guid]); $uid = $s->fetchColumn() ?: null;
+        } catch (Exception $e) { /* column not present on this install */ }
+    }
+    if (!$uid && $emp_code) {
         $s = $conn->prepare("SELECT id FROM users WHERE UPPER(emp_no)=? LIMIT 1");
         $s->execute([$emp_code]); $uid = $s->fetchColumn() ?: null;
     }
@@ -201,6 +209,10 @@ $get_user = function(string $emp_code, string $email) use ($conn, &$user_cache):
 };
 
 $synced = 0; $skipped = 0;
+// A row still inserts when no HRMS user matches, just with user_id NULL — which makes it
+// invisible to anything that filters by user. Count those separately so a sync that stores
+// 31 rows against nobody cannot report itself as a clean success.
+$linked = 0; $unlinked = [];
 
 foreach ($entries as $row) {
     $emp_code = strtoupper(trim(
@@ -239,7 +251,8 @@ foreach ($entries as $row) {
         if ($pi_h > 9.75) $status = 'LATE';
     }
 
-    $usr = $get_user($emp_code, $email);
+    $usr = $get_user($emp_code, $email, $guid);
+    if ($usr) { $linked++; } else { $unlinked[] = $emp_code ?: ($email ?: $tl_name); }
 
     try {
         $conn->prepare("
@@ -254,10 +267,13 @@ foreach ($entries as $row) {
 }
 
 $dbg = ['synced'=>$synced,'skipped'=>$skipped,'error'=>null,
+    'linked'=>$linked,'unlinked'=>$unlinked,
     'guid_count'=>count($guid_by_code),
     'ts_count'=>count($seg_totals),
     'guid_keys'=>array_keys($guid_by_code),
     'ts_keys'=>array_keys($seg_totals),
 ];
 file_put_contents(__DIR__.'/tl_sd_debug.json', json_encode($dbg, JSON_PRETTY_PRINT));
-echo json_encode(['synced'=>$synced,'skipped'=>$skipped,'error'=>null]);
+echo json_encode(['synced'=>$synced,'skipped'=>$skipped,'error'=>null,
+    'linked'=>$linked, 'unlinked'=>count($unlinked),
+    'unlinked_who'=>array_values(array_slice(array_filter($unlinked), 0, 20))]);

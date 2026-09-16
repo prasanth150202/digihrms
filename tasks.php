@@ -2225,7 +2225,7 @@ if (!empty($flash)): ?>
 
     function run() {
         btn.disabled = true;
-        var i = 0, synced = 0, failed = 0, lastErr = '';
+        var i = 0, synced = 0, failed = 0, linked = 0, unlinked = 0, lastErr = '', who = [];
 
         function step() {
             if (i >= days.length) {
@@ -2235,8 +2235,22 @@ if (!empty($flash)): ?>
                     showToast(lastErr || 'Nothing could be synced.', 'error', 'Sync failed');
                     return;
                 }
+                // A row with no matching HRMS user is stored but invisible to every report,
+                // so say so rather than reporting a row count as success.
+                if (unlinked) {
+                    btn.disabled = false;
+                    msg.textContent = '';
+                    showToast(
+                        synced + ' row(s) stored, but ' + unlinked + ' could not be matched to an HRMS user' +
+                        (who.length ? ' (' + who.slice(0, 5).join(', ') + (who.length > 5 ? '…' : '') + ')' : '') +
+                        '. Those are invisible to reports until the person\'s employee code or email matches TeamLogger.',
+                        'warning', 'Synced, but not linked', 12000);
+                    if (linked) setTimeout(function () { location.reload(); }, 2500);
+                    return;
+                }
                 msg.textContent = 'Reloading…';
-                showToast('Synced ' + synced + ' record(s)' + (failed ? ', ' + failed + ' day(s) failed' : '') + '.',
+                showToast('Synced ' + synced + ' record(s), ' + linked + ' linked' +
+                          (failed ? ', ' + failed + ' day(s) failed' : '') + '.',
                           failed ? 'warning' : 'success', 'TeamLogger');
                 setTimeout(function () { location.reload(); }, 900);
                 return;
@@ -2248,7 +2262,13 @@ if (!empty($flash)): ?>
             fetch('teamlogger_sync_day.php', { method: 'POST', body: fd, credentials: 'same-origin' })
                 .then(function (r) { return r.json(); })
                 .then(function (j) {
-                    if (j && j.error) { failed++; lastErr = j.error; } else { synced += (j && j.synced) || 0; }
+                    if (j && j.error) { failed++; lastErr = j.error; return; }
+                    synced   += (j && j.synced)   || 0;
+                    linked   += (j && j.linked)   || 0;
+                    unlinked += (j && j.unlinked) || 0;
+                    if (j && j.unlinked_who) {
+                        j.unlinked_who.forEach(function (n) { if (who.indexOf(n) === -1) who.push(n); });
+                    }
                 })
                 .catch(function () { failed++; lastErr = 'Could not reach the sync endpoint.'; })
                 .then(step);
