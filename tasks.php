@@ -15,6 +15,8 @@ try { $conn->exec("ALTER TABLE tasks ADD COLUMN learning_badge_id INT NULL"); } 
 try { $conn->exec("ALTER TABLE tasks ADD COLUMN learning_material TEXT NULL"); } catch (PDOException $e) {}
 try { $conn->exec("ALTER TABLE tasks ADD COLUMN learning_pass_pct TINYINT NOT NULL DEFAULT 80"); } catch (PDOException $e) {}
 try { $conn->exec("ALTER TABLE tasks ADD COLUMN quiz_required     TINYINT(1) NOT NULL DEFAULT 0"); } catch (PDOException $e) {}
+// Per-user board column order and visibility, stored as a CSV of status keys
+try { $conn->exec("ALTER TABLE users ADD COLUMN board_cols VARCHAR(255) NULL DEFAULT NULL"); } catch (PDOException $e) {}
 // Set on timers the system closed automatically; kept so historical rows stay explainable
 try { $conn->exec("ALTER TABLE task_timers ADD COLUMN auto_closed TINYINT(1) NOT NULL DEFAULT 0"); } catch (PDOException $e) {}
 $u         = current_user();
@@ -26,10 +28,14 @@ $hr_view   = $role === 'HR_ADMIN';
 // Beta Workspace: adds the focus Board tab and makes it the landing view for opted-in
 // users. Wrapped so a not-yet-migrated column leaves everyone on the classic task list.
 $workspace_beta = false;
+$board_cols_pref = '';
 try {
-    $wb = $conn->prepare("SELECT workspace_beta FROM users WHERE id=?");
+    $wb = $conn->prepare("SELECT workspace_beta, board_cols FROM users WHERE id=?");
     $wb->execute([$uid]);
-    $workspace_beta = (bool)$wb->fetchColumn();
+    if ($wbr = $wb->fetch()) {
+        $workspace_beta  = (bool)$wbr['workspace_beta'];
+        $board_cols_pref = (string)($wbr['board_cols'] ?? '');
+    }
 } catch (Exception $e) { $workspace_beta = false; }
 if ($workspace_beta) $pageTitle = 'Workspace';
 
@@ -141,6 +147,20 @@ if ($is_ajax && empty($_POST['action']) && !empty($_GET['action'])) {
 
 // Create task (TL/Admin only)
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
+
+    // Board column layout — order and visibility, per user
+    if ($_POST['action'] === 'save_board_cols') {
+        $valid = ['TODO','IN_PROGRESS','REWORK','BLOCKED','REVIEW','DONE'];
+        $want  = array_map('trim', explode(',', (string)($_POST['cols'] ?? '')));
+        $keys  = array_values(array_unique(array_filter($want, fn($k) => in_array($k, $valid, true))));
+        try {
+            // Empty means "show everything" rather than a board with no columns at all.
+            $conn->prepare("UPDATE users SET board_cols=? WHERE id=?")
+                 ->execute([$keys ? implode(',', $keys) : null, $uid]);
+        } catch (Exception $e) { /* column not migrated yet */ }
+        if ($is_ajax) ajax_ok();
+        header('Location: tasks.php?tab=board'); exit;
+    }
 
     // Employee (or HR) creates a task for themselves
     if ($_POST['action'] === 'create_own_task' && !$is_tl) {
@@ -455,7 +475,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     // Update task status
     if ($_POST['action'] === 'update_status') {
         $tid = (int)$_POST['task_id'];
-        $allowed = ['TODO','IN_PROGRESS','REVIEW','DONE','REWORK'];
+        // BLOCKED was missing here while quick_edit accepted it, so dragging a card to the
+        // Blocked column moved it on screen and silently failed to save.
+        $allowed = ['TODO','IN_PROGRESS','REVIEW','DONE','REWORK','BLOCKED'];
         $ns = $_POST['new_status'];
         if (in_array($ns, $allowed)) {
             $chk = $conn->prepare("SELECT assigned_to, assigned_by, status, needs_approval, to_tl_id, title, is_learning_task, quiz_required FROM tasks WHERE id=?");
@@ -1798,10 +1820,22 @@ if (!empty($flash)): ?>
     foreach ($board_tasks as $t) {
         if (isset($board[$t['status']])) $board[$t['status']]['items'][] = $t;
     }
-    // Keep the board tidy — drop the exception columns when nothing is in them
-    foreach (['REWORK','BLOCKED'] as $optional) {
-        if (empty($board[$optional]['items'])) unset($board[$optional]);
+
+    // Apply this user's saved order and visibility. Anything they left out is hidden, but
+    // the tasks in it still exist, so count them rather than letting work vanish quietly.
+    $board_hidden_count = 0;
+    $pref_keys = array_values(array_filter(array_map('trim', explode(',', $board_cols_pref))));
+    if ($pref_keys) {
+        $ordered = [];
+        foreach ($pref_keys as $k) if (isset($board[$k])) $ordered[$k] = $board[$k];
+        if ($ordered) {
+            foreach ($board as $k => $col) {
+                if (!isset($ordered[$k])) $board_hidden_count += count($col['items']);
+            }
+            $board = $ordered;
+        }
     }
+    $board_all = $board_cols; // for the layout editor
     $today = date('Y-m-d');
 ?>
 
@@ -1877,7 +1911,27 @@ if (!empty($flash)): ?>
 
 .wsb-empty { text-align:center; color:var(--text-muted); font-size:.75rem; padding:18px 0; opacity:.8; }
 .wsb-hint { display:flex; align-items:center; gap:7px; margin-bottom:14px;
-    font-size:.79rem; color:var(--text-muted); }
+    font-size:.79rem; color:var(--text-muted); flex-wrap:wrap; }
+.wsb-hidden-note { background:rgba(245,158,11,.15); color:#b45309; border-radius:20px;
+    padding:1px 9px; font-size:.7rem; font-weight:600; }
+[data-theme="dark"] .wsb-hidden-note { color:#fcd34d; }
+.wsb-cols-btn { margin-left:auto; background:transparent; border:1px solid var(--wsb-col-bdr,#e6edf5);
+    color:var(--text-secondary); border-radius:8px; padding:3px 11px; font-size:.75rem; font-weight:600; }
+.wsb-cols-btn:hover { border-color:var(--primary); color:var(--primary); }
+.wsb-cols-panel { background:var(--card-bg); border:1px solid var(--card-bdr); border-radius:12px;
+    padding:14px 16px; margin-bottom:16px; max-width:330px; }
+.wsb-cols-title { font-size:.7rem; font-weight:700; text-transform:uppercase; letter-spacing:.05em;
+    color:var(--text-muted); margin-bottom:9px; }
+.wsb-cols-panel ul { list-style:none; margin:0 0 11px; padding:0; }
+.wsb-cols-panel li { display:flex; align-items:center; justify-content:space-between; gap:10px;
+    padding:5px 0; border-bottom:1px solid var(--card-bdr); }
+.wsb-cols-panel li:last-child { border-bottom:none; }
+.wsb-cols-panel label { font-size:.82rem; color:var(--text-primary); display:flex; align-items:center;
+    gap:7px; margin:0; cursor:pointer; }
+.wsb-cols-panel li button { background:var(--wsb-col-bg,#f6f8fb); border:1px solid var(--wsb-col-bdr,#e6edf5);
+    color:var(--text-secondary); border-radius:6px; width:24px; height:22px; font-size:.7rem; line-height:1; }
+.wsb-cols-panel li button:hover { border-color:var(--primary); color:var(--primary); }
+.wsb-cols-actions { display:flex; gap:7px; }
 .wsb-board::-webkit-scrollbar { height:7px; }
 .wsb-board::-webkit-scrollbar-thumb { background:var(--wsb-col-bdr); border-radius:4px; }
 
@@ -1891,15 +1945,43 @@ if (!empty($flash)): ?>
 <div class="wsb-hint">
     <i class="bi bi-arrows-move"></i>
     Drag a card between columns to change its stage. Anything in <strong>In&nbsp;Progress</strong> is timed automatically.
+    <?php if ($board_hidden_count): ?>
+    <span class="wsb-hidden-note"><?= (int)$board_hidden_count ?> task(s) sit in hidden columns</span>
+    <?php endif; ?>
+    <button type="button" class="wsb-cols-btn" onclick="document.getElementById('wsbCols').hidden = !document.getElementById('wsbCols').hidden;">
+        <i class="bi bi-sliders"></i> Columns
+    </button>
 </div>
 
+<form method="POST" id="wsbCols" hidden class="wsb-cols-panel">
+    <input type="hidden" name="action" value="save_board_cols">
+    <input type="hidden" name="cols" id="wsbColsValue">
+    <div class="wsb-cols-title">Show and order columns</div>
+    <ul id="wsbColsList">
+        <?php
+        // Saved columns first in their chosen order, then whatever is left, unticked.
+        $listed = [];
+        foreach ($pref_keys as $k) if (isset($board_all[$k])) $listed[$k] = true;
+        foreach (array_keys($board_all) as $k) if (!isset($listed[$k])) $listed[$k] = !$pref_keys;
+        foreach ($listed as $k => $on): ?>
+        <li data-key="<?= $k ?>">
+            <label><input type="checkbox" <?= $on ? 'checked' : '' ?>> <?= sanitize($board_all[$k]['label']) ?></label>
+            <span>
+                <button type="button" onclick="wsbMove(this,-1)" title="Move left">&uarr;</button>
+                <button type="button" onclick="wsbMove(this,1)" title="Move right">&darr;</button>
+            </span>
+        </li>
+        <?php endforeach; ?>
+    </ul>
+    <div class="wsb-cols-actions">
+        <button type="button" onclick="wsbSaveCols(this.form)" class="btn btn-primary btn-sm">Save</button>
+        <button type="button" onclick="wsbResetCols(this.form)" class="btn btn-light btn-sm">Reset</button>
+    </div>
+</form>
+
 <div class="kanban-board wsb-board">
-<?php foreach ($board as $status => $col):
-    // BLOCKED is deliberately not a .kanban-col: update_status rejects it server-side, so
-    // making it a drop target would move the card on screen and silently fail to save.
-    $is_locked = $status === 'BLOCKED';
-?>
-    <div class="wsb-col <?= $is_locked ? '' : 'kanban-col' ?>" data-status="<?= $status ?>">
+<?php foreach ($board as $status => $col): ?>
+    <div class="wsb-col kanban-col" data-status="<?= $status ?>">
         <div class="wsb-col-hd">
             <div class="wsb-col-title">
                 <span class="wsb-dot" style="background:<?= $col['dot'] ?>;"></span>
@@ -1910,7 +1992,7 @@ if (!empty($flash)): ?>
         <div class="kanban-cards wsb-cards" id="kc-<?= $status ?>">
             <?php foreach ($col['items'] as $t):
                 $tid      = (int)$t['id'];
-                $can_drag = !$hr_view && !$is_locked;
+                $can_drag = !$hr_view;
                 $elapsed  = $board_running[$tid] ?? null;
                 $overdue  = !empty($t['due_date']) && $t['due_date'] < $today && $status !== 'DONE';
             ?>
@@ -1963,6 +2045,26 @@ if (!empty($flash)): ?>
 </div>
 
 <script>
+function wsbMove(btn, dir) {
+    var li = btn.closest('li');
+    var sib = dir < 0 ? li.previousElementSibling : li.nextElementSibling;
+    if (!sib) return;
+    dir < 0 ? li.parentNode.insertBefore(li, sib) : li.parentNode.insertBefore(sib, li);
+}
+function wsbSaveCols(form) {
+    var keys = [];
+    form.querySelectorAll('#wsbColsList li').forEach(function (li) {
+        if (li.querySelector('input').checked) keys.push(li.dataset.key);
+    });
+    if (!keys.length) { showToast('Keep at least one column visible.', 'warning', 'Columns'); return; }
+    document.getElementById('wsbColsValue').value = keys.join(',');
+    form.submit();
+}
+function wsbResetCols(form) {
+    document.getElementById('wsbColsValue').value = '';
+    form.submit();
+}
+
 (function () {
     var board = document.querySelector('.wsb-board');
     if (!board) return;
