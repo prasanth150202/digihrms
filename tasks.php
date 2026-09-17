@@ -15,7 +15,7 @@ try { $conn->exec("ALTER TABLE tasks ADD COLUMN learning_badge_id INT NULL"); } 
 try { $conn->exec("ALTER TABLE tasks ADD COLUMN learning_material TEXT NULL"); } catch (PDOException $e) {}
 try { $conn->exec("ALTER TABLE tasks ADD COLUMN learning_pass_pct TINYINT NOT NULL DEFAULT 80"); } catch (PDOException $e) {}
 try { $conn->exec("ALTER TABLE tasks ADD COLUMN quiz_required     TINYINT(1) NOT NULL DEFAULT 0"); } catch (PDOException $e) {}
-// Marks a timer the system closed because it was left running (see close_stale_task_timers)
+// Set on timers the system closed automatically; kept so historical rows stay explainable
 try { $conn->exec("ALTER TABLE task_timers ADD COLUMN auto_closed TINYINT(1) NOT NULL DEFAULT 0"); } catch (PDOException $e) {}
 $u         = current_user();
 $uid       = $u['id'];
@@ -33,9 +33,11 @@ try {
 } catch (Exception $e) { $workspace_beta = false; }
 if ($workspace_beta) $pageTitle = 'Workspace';
 
-// Sweep up timers left running from a previous day before anything reads them, so the
-// board and the report never show a session that has been open for 40 hours.
-if ($workspace_beta) close_stale_task_timers($conn, $uid, 12);
+// A card in In Progress should always be running a timer — that is what the column means.
+// Restart any that stopped, so work after an interruption is still recorded. Leaving the
+// timer running is safe now that the report clips task time to TeamLogger's activity, so
+// an overnight gap earns nothing regardless of whether the timer was still open.
+if ($workspace_beta) resume_in_progress_timers($conn, $uid);
 
 function log_task_activity($conn, $task_id, $user_id, $action, $detail = '') {
     $conn->prepare("INSERT INTO task_activity_logs (task_id,user_id,action,detail) VALUES (?,?,?,?)")
@@ -867,10 +869,6 @@ if ($workspace_beta && ($tab === 'report' || isset($_GET['export']))) {
     if (strtotime($rep_to) - strtotime($rep_from) > 186 * 86400) {
         $rep_from = date('Y-m-d', strtotime($rep_to . ' -186 days'));
     }
-
-    // Clean the subject's abandoned timers too — otherwise a teammate who never opens the
-    // board keeps accruing multi-day sessions that only this report ever surfaces.
-    if ($rep_uid !== (int)$uid) close_stale_task_timers($conn, $rep_uid, 12);
 
     $rq = $conn->prepare("SELECT tt.task_id, tt.started_at, tt.auto_closed,
             COALESCE(tt.ended_at, NOW()) AS ended_at, t.title, t.project_id, p.name AS project_name

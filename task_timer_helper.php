@@ -156,50 +156,24 @@ function get_elapsed_timer_seconds($conn, $task_id, $user_id) {
 }
 
 /**
- * Close timers left running past $max_hours.
- * The board starts a timer when a card enters In Progress and stops it only when the card
- * leaves, so a card parked there overnight would otherwise bank the whole span as work.
- * The capped duration is a guess, which is why the row is marked auto_closed for reports.
+ * Make sure every In Progress task has a running timer.
+ *
+ * The column means "I am working on this", so the timer should be open whenever a card sits
+ * there. Timers used to be force-closed after 12 hours, which left the card in In Progress
+ * with nothing recording — the next day's work vanished. Clipping against TeamLogger's
+ * activity now bounds the total, so a timer left open across a night costs nothing.
  */
-function close_stale_task_timers($conn, $user_id, $max_hours = 12) {
-    $h = max(1, (int)$max_hours);
+function resume_in_progress_timers($conn, $user_id) {
     try {
-        $sel = $conn->prepare("SELECT id, task_id, started_at FROM task_timers
-            WHERE user_id = ? AND ended_at IS NULL AND started_at < NOW() - INTERVAL $h HOUR");
-        $sel->execute([$user_id]);
-        $rows = $sel->fetchAll();
-        if (!$rows) return 0;
-
-        // Prefer the person's last recorded activity over an arbitrary cut at +N hours.
-        // Cutting blind lands in the middle of the night, and the next day's real work then
-        // falls outside the session entirely and is lost.
-        $lastAct = null;
-        try {
-            $lastAct = $conn->prepare("SELECT MAX(end_at) FROM tl_segments
-                WHERE user_id = ? AND type IN ('active','meeting')
-                  AND end_at > ? AND end_at < ? + INTERVAL 36 HOUR");
-        } catch (Exception $e) { $lastAct = null; }
-
-        $close = $conn->prepare("UPDATE task_timers
-            SET ended_at = ?, duration_seconds = GREATEST(0, TIMESTAMPDIFF(SECOND, started_at, ?)), auto_closed = 1
-            WHERE id = ?");
-        $idle = $conn->prepare("UPDATE tasks SET timer_status='INACTIVE', timer_started_at=NULL WHERE id=?");
-
-        foreach ($rows as $r) {
-            $end = null;
-            if ($lastAct) {
-                try {
-                    $lastAct->execute([$user_id, $r['started_at'], $r['started_at']]);
-                    $end = $lastAct->fetchColumn() ?: null;
-                } catch (Exception $e) { $end = null; }
-            }
-            if (!$end) $end = date('Y-m-d H:i:s', strtotime($r['started_at']) + $h * 3600);
-            $close->execute([$end, $end, (int)$r['id']]);
-            $idle->execute([(int)$r['task_id']]);
-        }
-        return count($rows);
+        $stale = $conn->prepare("SELECT id FROM tasks
+            WHERE assigned_to = ? AND status = 'IN_PROGRESS' AND deleted_at IS NULL
+              AND (timer_status IS NULL OR timer_status <> 'ACTIVE')");
+        $stale->execute([$user_id]);
+        $ids = $stale->fetchAll(PDO::FETCH_COLUMN);
+        foreach ($ids as $tid) start_task_timer($conn, (int)$tid, $user_id);
+        return count($ids);
     } catch (Exception $e) {
-        error_log("Stale timer close error: " . $e->getMessage());
+        error_log("Resume timer error: " . $e->getMessage());
         return 0;
     }
 }
