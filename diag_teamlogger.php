@@ -88,6 +88,21 @@ say($rows, 'API key configured', $api_key !== '',
                     : 'present (' . strlen($api_key) . ' chars, ends …' . substr($api_key, -4) . ')');
 say($rows, 'Day window settings', true, "timezoneOffsetMinutes=$tz, dayStartsAtHours=$day_start, dayEndsAtHours=$day_end");
 
+// ── 1b. Clocks ────────────────────────────────────────────
+// Task timers are stamped by MySQL (CURRENT_TIMESTAMP); activity segments are written by
+// PHP. Clipping one against the other only works if both clocks agree — a gap here shifts
+// every comparison by exactly that much.
+try {
+    $db_now  = $conn->query("SELECT NOW()")->fetchColumn();
+    $php_now = date('Y-m-d H:i:s');
+    $gap     = abs(strtotime($db_now) - strtotime($php_now));
+    say($rows, 'PHP and MySQL clocks agree', $gap <= 90,
+        "PHP: $php_now (" . date_default_timezone_get() . "), MySQL: $db_now"
+        . ($gap > 90 ? ' — off by ' . round($gap / 60) . ' min. Task time and activity windows will not line up.' : ''));
+} catch (Exception $e) {
+    say($rows, 'PHP and MySQL clocks agree', false, 'Could not read MySQL NOW(): ' . $e->getMessage());
+}
+
 // ── 2. Who am I, in HRMS terms ────────────────────────────
 $meRow = $conn->prepare("SELECT u.id, u.name, u.email, u.role, u.emp_no, u.tl_guid FROM users u WHERE u.id=?");
 $meRow->execute([$me['id']]);

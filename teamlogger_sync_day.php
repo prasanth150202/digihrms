@@ -288,10 +288,12 @@ if ($ts_requests) {
             $dur_h   = ($en - $st) / 3600000;
             $idle_h  = (float)($e['idleHours'] ?? 0);
             $meeting = !empty($e['meetingMode']);
-            // Epoch ms -> local wall clock, matching how the day bounds above were built,
-            // so these line up with task_timers' own timestamps.
-            $l_start = intdiv($st, 1000) + $offset_s;
-            $l_end   = intdiv($en, 1000) + $offset_s;
+            // startTime/endTime are true UTC epochs — the same space as $start_ms, which is
+            // built by subtracting the offset from UTC midnight. date() already renders in
+            // the app timezone, so adding the offset again would shift every window forward
+            // by a whole working day's worth of hours.
+            $l_start = intdiv($st, 1000);
+            $l_end   = intdiv($en, 1000);
             if ($meeting) {
                 $t['meeting'] += $dur_h;
                 $segs[] = ['meeting', $l_start, $l_end];
