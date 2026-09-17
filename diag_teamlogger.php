@@ -115,8 +115,39 @@ say($rows, 'Matchable to TeamLogger', !empty($meRow['emp_no']) || !empty($meRow[
     'The sync matches on UPPER(emp_no) first, then LOWER(email). With neither set you can never be matched.');
 
 // ── 3. Live API checks ────────────────────────────────────
+// Roster first: the identity check below resolves people through it, so the maps have to
+// exist before anything consults them.
+$ulist = [];
+$guid_by_code = $guid_by_email = $email_by_code = $email_by_guid = [];
+$email_by_name = $guid_by_name = $name_seen = [];
 $punch_count = null;
 if ($api_key !== '') {
+    $users = tl_diag_api('/api/integration/list_users', $api_key);
+    if (isset($users['error'])) {
+        say($rows, 'TeamLogger user list', false, $users['error']);
+    } else {
+        $ulist = isset($users[0]) ? $users : ($users['data'] ?? []);
+        say($rows, 'TeamLogger user list', count($ulist) > 0, count($ulist) . ' users returned (API key works)');
+        foreach ($ulist as $tu) {
+            $n = mb_strtolower(trim($tu['name'] ?? $tu['employeeName'] ?? $tu['fullName'] ?? $tu['username'] ?? ''));
+            if ($n !== '') $name_seen[$n] = ($name_seen[$n] ?? 0) + 1;
+        }
+        foreach ($ulist as $tu) {
+            $c = strtoupper(trim($tu['employeeCode'] ?? $tu['empCode'] ?? $tu['code'] ?? $tu['employeeId'] ?? ''));
+            $e = strtolower(trim($tu['email'] ?? $tu['employeeEmail'] ?? ''));
+            $g = $tu['guid'] ?? $tu['id'] ?? $tu['userId'] ?? '';
+            $n = mb_strtolower(trim($tu['name'] ?? $tu['employeeName'] ?? $tu['fullName'] ?? $tu['username'] ?? ''));
+            if ($c && $g) $guid_by_code[$c]  = $g;
+            if ($e && $g) $guid_by_email[$e] = $g;
+            if ($c && $e) $email_by_code[$c] = $e;
+            if ($g && $e) $email_by_guid[$g] = $e;
+            if ($n && ($name_seen[$n] ?? 0) === 1) {
+                if ($e) $email_by_name[$n] = $e;
+                if ($g) $guid_by_name[$n]  = $g;
+            }
+        }
+    }
+
     [$y, $m, $d] = explode('-', $date);
     $report = tl_diag_api('/api/company_punch_in_out_report', $api_key, [
         'year' => (int)$y, 'month' => (int)$m, 'day' => (int)$d,
@@ -140,18 +171,27 @@ if ($api_key !== '') {
             if (($meRow['emp_no'] && $code === strtoupper(trim($meRow['emp_no'])))
              || ($meRow['email'] && $email === strtolower(trim($meRow['email'])))) { $mine = $e; break; }
         }
+        // Report against the keys the sync actually uses, not just emp_no/email — tl_guid
+        // and the roster-by-name path both link people this check used to call a failure.
+        $me_via = $mine ? 'emp_no or email on the punch row' : '';
+        if (!$mine && !empty($meRow['tl_guid'])) {
+            foreach ($entries as $e) {
+                $c = strtoupper(trim($e['employeeCode'] ?? $e['empCode'] ?? $e['code'] ?? $e['employeeId'] ?? ''));
+                $n = trim($e['employeeName'] ?? $e['name'] ?? $e['fullName'] ?? $e['username'] ?? '');
+                $nm = mb_strtolower($n);
+                $g  = ($c ? ($guid_by_code[$c] ?? null) : null) ?? ($nm ? ($guid_by_name[$nm] ?? null) : null);
+                if ($g && (string)$g === (string)$meRow['tl_guid']) {
+                    $mine = $e;
+                    $me_via = 'tl_guid, resolved from the roster' . ($c ? ' by code' : ' by name');
+                    break;
+                }
+            }
+        }
         say($rows, 'You appear in that punch report', $mine !== null,
-            $mine ? 'matched — keys present: ' . implode(', ', array_slice(array_keys($mine), 0, 12))
-                  : 'no entry matched your emp_no or email. Your time would sync for others but not for you.');
+            $mine ? 'matched via ' . $me_via
+                  : 'no punch entry resolves to you by code, email, tl_guid or name — your hours cannot be attributed.');
     }
 
-    $users = tl_diag_api('/api/integration/list_users', $api_key);
-    if (isset($users['error'])) {
-        say($rows, 'TeamLogger user list', false, $users['error']);
-    } else {
-        $ulist = isset($users[0]) ? $users : ($users['data'] ?? []);
-        say($rows, 'TeamLogger user list', count($ulist) > 0, count($ulist) . ' users returned (API key works)');
-    }
 }
 
 // ── 3b. Side-by-side mapping: every TeamLogger person vs HRMS ──
@@ -168,29 +208,6 @@ if ($api_key !== '' && !empty($entries)) {
         if (!empty($h['emp_no']))  $by_code[strtoupper(trim($h['emp_no']))]     = $h;
         if (!empty($h['email']))   $by_email[strtolower(trim($h['email']))]     = $h;
         if (!empty($h['name']))    $by_name[strtolower(trim($h['name']))]       = $h;
-    }
-
-    $guid_by_code = $guid_by_email = $email_by_code = $email_by_guid = [];
-    $email_by_name = $guid_by_name = $name_seen = [];
-    if (!isset($users['error'])) {
-        foreach ($ulist as $tu) {
-            $n = mb_strtolower(trim($tu['name'] ?? $tu['employeeName'] ?? $tu['fullName'] ?? $tu['username'] ?? ''));
-            if ($n !== '') $name_seen[$n] = ($name_seen[$n] ?? 0) + 1;
-        }
-        foreach ($ulist as $tu) {
-            $c = strtoupper(trim($tu['employeeCode'] ?? $tu['empCode'] ?? $tu['code'] ?? $tu['employeeId'] ?? ''));
-            $e = strtolower(trim($tu['email'] ?? $tu['employeeEmail'] ?? ''));
-            $g = $tu['guid'] ?? $tu['id'] ?? $tu['userId'] ?? '';
-            $n = mb_strtolower(trim($tu['name'] ?? $tu['employeeName'] ?? $tu['fullName'] ?? $tu['username'] ?? ''));
-            if ($c && $g) $guid_by_code[$c]  = $g;
-            if ($e && $g) $guid_by_email[$e] = $g;
-            if ($c && $e) $email_by_code[$c] = $e;
-            if ($g && $e) $email_by_guid[$g] = $e;
-            if ($n && ($name_seen[$n] ?? 0) === 1) {
-                if ($e) $email_by_name[$n] = $e;
-                if ($g) $guid_by_name[$n]  = $g;
-            }
-        }
     }
 
     foreach ($entries as $e) {

@@ -164,18 +164,37 @@ function get_elapsed_timer_seconds($conn, $task_id, $user_id) {
 function close_stale_task_timers($conn, $user_id, $max_hours = 12) {
     $h = max(1, (int)$max_hours);
     try {
-        $sel = $conn->prepare("SELECT id, task_id FROM task_timers
+        $sel = $conn->prepare("SELECT id, task_id, started_at FROM task_timers
             WHERE user_id = ? AND ended_at IS NULL AND started_at < NOW() - INTERVAL $h HOUR");
         $sel->execute([$user_id]);
         $rows = $sel->fetchAll();
         if (!$rows) return 0;
 
+        // Prefer the person's last recorded activity over an arbitrary cut at +N hours.
+        // Cutting blind lands in the middle of the night, and the next day's real work then
+        // falls outside the session entirely and is lost.
+        $lastAct = null;
+        try {
+            $lastAct = $conn->prepare("SELECT MAX(end_at) FROM tl_segments
+                WHERE user_id = ? AND type IN ('active','meeting')
+                  AND end_at > ? AND end_at < ? + INTERVAL 36 HOUR");
+        } catch (Exception $e) { $lastAct = null; }
+
         $close = $conn->prepare("UPDATE task_timers
-            SET ended_at = started_at + INTERVAL $h HOUR, duration_seconds = ?, auto_closed = 1
+            SET ended_at = ?, duration_seconds = GREATEST(0, TIMESTAMPDIFF(SECOND, started_at, ?)), auto_closed = 1
             WHERE id = ?");
         $idle = $conn->prepare("UPDATE tasks SET timer_status='INACTIVE', timer_started_at=NULL WHERE id=?");
+
         foreach ($rows as $r) {
-            $close->execute([$h * 3600, (int)$r['id']]);
+            $end = null;
+            if ($lastAct) {
+                try {
+                    $lastAct->execute([$user_id, $r['started_at'], $r['started_at']]);
+                    $end = $lastAct->fetchColumn() ?: null;
+                } catch (Exception $e) { $end = null; }
+            }
+            if (!$end) $end = date('Y-m-d H:i:s', strtotime($r['started_at']) + $h * 3600);
+            $close->execute([$end, $end, (int)$r['id']]);
             $idle->execute([(int)$r['task_id']]);
         }
         return count($rows);
