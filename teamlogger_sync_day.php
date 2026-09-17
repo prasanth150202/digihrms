@@ -21,6 +21,21 @@ if (!in_array($_SESSION['user']['role'] ?? '', ['SUPER_ADMIN','HR_ADMIN','DEPT_M
 
 set_time_limit(120);
 
+// Per-interval activity. The API gives it on every sync and it was being reduced to daily
+// totals and discarded; reports need the intervals themselves to clip task time to the
+// hours somebody was actually working.
+try {
+    $conn->exec("CREATE TABLE IF NOT EXISTS tl_segments (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        user_id INT NOT NULL,
+        date DATE NOT NULL,
+        type VARCHAR(16) NOT NULL,
+        start_at DATETIME NOT NULL,
+        end_at DATETIME NOT NULL,
+        INDEX idx_user_date (user_id, date)
+    )");
+} catch (PDOException $e) {}
+
 $date = $_POST['date'] ?? '';
 if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
     echo json_encode(['synced' => 0, 'skipped' => 0, 'error' => 'Invalid date']);
@@ -142,6 +157,19 @@ foreach ($tl_users as $tu) {
     }
 }
 
+// One place that decides which TeamLogger account a punch row belongs to. Both the
+// timesheet fetch and the DB write use it — they resolved this separately before, drifted
+// apart, and people with no employee code silently lost their idle/meeting data.
+$resolve_guid = function (array $row) use ($guid_by_code, $guid_by_email, $guid_by_name): ?string {
+    $c = strtoupper(trim($row['employeeCode'] ?? $row['empCode'] ?? $row['code'] ?? $row['employeeId'] ?? ''));
+    $e = strtolower(trim($row['employeeEmail'] ?? $row['email'] ?? ''));
+    $n = mb_strtolower(trim($row['employeeName'] ?? $row['name'] ?? $row['fullName'] ?? $row['username'] ?? ''));
+    $g = ($c ? ($guid_by_code[$c] ?? null) : null)
+      ?? ($e ? ($guid_by_email[$e] ?? null) : null)
+      ?? ($n ? ($guid_by_name[$n] ?? null) : null);
+    return $g !== null ? (string)$g : null;
+};
+
 // ── 3. Fetch timesheet for each employee in parallel ─────
 $offset_s = (int)$tz * 60;
 $base_utc  = strtotime($date . ' 00:00:00 UTC');
@@ -150,9 +178,7 @@ $end_ms    = ($base_utc - $offset_s + 86399) * 1000;
 
 $ts_requests = [];
 foreach ($entries as $row) {
-    $ec = strtoupper(trim($row['employeeCode'] ?? $row['empCode'] ?? $row['code'] ?? $row['employeeId'] ?? ''));
-    $em = strtolower(trim($row['employeeEmail'] ?? $row['email'] ?? ''));
-    $g  = ($ec ? ($guid_by_code[$ec] ?? null) : null) ?? ($em ? ($guid_by_email[$em] ?? null) : null);
+    $g = $resolve_guid($row);
     if ($g && !isset($ts_requests[$g])) {
         $ts_requests[$g] = [$g, $start_ms, $end_ms];
     }
@@ -160,6 +186,7 @@ foreach ($entries as $row) {
 
 // Parallel curl for all timesheets
 $seg_totals = [];
+$seg_rows   = [];
 if ($ts_requests) {
     $mh = curl_multi_init();
     $handles = [];
@@ -185,20 +212,33 @@ if ($ts_requests) {
         if (!is_array($ts)) continue;
         $ts_entries = isset($ts[0]) ? $ts : ($ts['data'] ?? []);
         $t = ['active' => 0.0, 'idle' => 0.0, 'meeting' => 0.0];
+        $segs = [];
         foreach ($ts_entries as $e) {
             $st = (int)($e['startTime'] ?? 0); $en = (int)($e['endTime'] ?? 0);
             if ($st <= 0 || $en <= $st) continue;
             $dur_h   = ($en - $st) / 3600000;
             $idle_h  = (float)($e['idleHours'] ?? 0);
             $meeting = !empty($e['meetingMode']);
+            // Epoch ms -> local wall clock, matching how the day bounds above were built,
+            // so these line up with task_timers' own timestamps.
+            $l_start = intdiv($st, 1000) + $offset_s;
+            $l_end   = intdiv($en, 1000) + $offset_s;
             if ($meeting) {
                 $t['meeting'] += $dur_h;
+                $segs[] = ['meeting', $l_start, $l_end];
             } else {
-                $t['active'] += (float)($e['activeHours'] ?? max(0, $dur_h - $idle_h));
+                $act_h = (float)($e['activeHours'] ?? max(0, $dur_h - $idle_h));
+                $t['active'] += $act_h;
                 $t['idle']   += $idle_h;
+                // The API says how much of the entry was idle but not where, so follow the
+                // same convention as teamlogger.php: active first, then the idle remainder.
+                $split = min($l_end, $l_start + (int)round($act_h * 3600));
+                if ($split > $l_start) $segs[] = ['active', $l_start, $split];
+                if ($l_end > $split)   $segs[] = ['idle',   $split,   $l_end];
             }
         }
         $seg_totals[$guid] = $t;
+        $seg_rows[$guid]   = $segs;
     }
     curl_multi_close($mh);
 }
@@ -258,7 +298,7 @@ $synced = 0; $skipped = 0;
 // A row still inserts when no HRMS user matches, just with user_id NULL — which makes it
 // invisible to anything that filters by user. Count those separately so a sync that stores
 // 31 rows against nobody cannot report itself as a clean success.
-$linked = 0; $unlinked = []; $by_name = [];
+$linked = 0; $unlinked = []; $by_name = []; $seg_written = 0;
 
 foreach ($entries as $row) {
     $emp_code = strtoupper(trim(
@@ -277,11 +317,8 @@ foreach ($entries as $row) {
     // Break from punch report, idle/meeting from timesheet segments
     $break_h   = isset($row['breakHours']) && (float)$row['breakHours'] > 0 ? (string)round((float)$row['breakHours'], 4) : null;
     $ec2       = strtoupper(trim($row['employeeCode'] ?? $row['empCode'] ?? $row['code'] ?? $row['employeeId'] ?? ''));
-    $em2       = strtolower(trim($row['employeeEmail'] ?? $row['email'] ?? ''));
     $nm2       = mb_strtolower(trim($tl_name));
-    $guid      = ($ec2 ? ($guid_by_code[$ec2] ?? null) : null)
-              ?? ($em2 ? ($guid_by_email[$em2] ?? null) : null)
-              ?? ($nm2 ? ($guid_by_name[$nm2] ?? null) : null);
+    $guid      = $resolve_guid($row);
     // Punch rows often have no email; take it from the roster so matching has something to
     // work with when emp_no is unset in HRMS, which is the usual case. Falling back to the
     // name last covers rows carrying neither a code nor an address.
@@ -324,6 +361,20 @@ foreach ($entries as $row) {
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'TEAMLOGGER', ?, ?)
         ")->execute([$usr, $date, $punch_in, $punch_out, $hours, $break_h, $active_h, $idle_h, $meeting_h, $status, $emp_code, $tl_name]);
         $synced++;
+
+        // Store this person's intervals for the day. Only possible once $usr is known,
+        // which is why an unlinked person gets no segments and so no verified task time.
+        if ($usr && $guid && !empty($seg_rows[$guid])) {
+            try {
+                $conn->prepare("DELETE FROM tl_segments WHERE user_id=? AND date=?")->execute([$usr, $date]);
+                $ins = $conn->prepare("INSERT INTO tl_segments (user_id,date,type,start_at,end_at) VALUES (?,?,?,?,?)");
+                foreach ($seg_rows[$guid] as [$type, $ls, $le]) {
+                    if ($le <= $ls) continue;
+                    $ins->execute([$usr, $date, $type, date('Y-m-d H:i:s', $ls), date('Y-m-d H:i:s', $le)]);
+                }
+                $seg_written++;
+            } catch (Exception $e) { /* table missing on this install */ }
+        }
     } catch (Exception $e) {
         $skipped++;
     }
@@ -340,5 +391,5 @@ file_put_contents(__DIR__.'/tl_sd_debug.json', json_encode($dbg, JSON_PRETTY_PRI
 echo json_encode(['synced'=>$synced,'skipped'=>$skipped,'error'=>null,
     'linked'=>$linked, 'unlinked'=>count($unlinked),
     'unlinked_who'=>array_values(array_unique(array_filter($unlinked))),
-    'by_name'=>count($by_name),
+    'by_name'=>count($by_name), 'segments'=>$seg_written,
     'by_name_who'=>array_values(array_unique(array_filter($by_name)))]);

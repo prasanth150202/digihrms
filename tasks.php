@@ -884,7 +884,21 @@ if ($workspace_beta && ($tab === 'report' || isset($_GET['export']))) {
     $rq->execute([$rep_uid, $rep_to, $rep_from]);
     $rep_rows = $rq->fetchAll();
 
-    $rep_sum    = summarize_task_time($rep_rows, $rep_from, $rep_to);
+    // TeamLogger's working windows for this person. Task time gets clipped to these, so a
+    // card left In Progress overnight stops earning when they actually stopped. Meetings
+    // count as work; idle and break deliberately do not.
+    $rep_windows = [];
+    try {
+        $sq = $conn->prepare("SELECT date, start_at, end_at FROM tl_segments
+            WHERE user_id=? AND date>=? AND date<=? AND type IN ('active','meeting')
+            ORDER BY start_at");
+        $sq->execute([$rep_uid, $rep_from, $rep_to]);
+        foreach ($sq->fetchAll() as $sg) {
+            $rep_windows[$sg['date']][] = [strtotime($sg['start_at']), strtotime($sg['end_at'])];
+        }
+    } catch (Exception $e) { $rep_windows = []; }
+
+    $rep_sum    = summarize_task_time($rep_rows, $rep_from, $rep_to, $rep_windows);
     $rep_titles = [];
     $rep_auto   = [];
     $rep_task_proj = []; // task_id => project key ('' when the task has no project)
@@ -952,6 +966,7 @@ if ($workspace_beta && ($tab === 'report' || isset($_GET['export']))) {
         'titles' => $rep_titles, 'auto' => $rep_auto,
         'projects' => $rep_projects, 'proj_name' => $rep_proj_name, 'task_proj' => $rep_task_proj,
         'att' => $rep_att, 'att_ok' => $rep_att_ok, 'active_total' => $rep_active_total,
+        'windows' => $rep_windows,
         'worked_total' => $rep_worked_total, 'worked' => $rep_worked,
     ];
 
@@ -2108,19 +2123,12 @@ if (!empty($flash)): ?>
 </div>
 <?php endif; ?>
 
-<?php if (!empty($rep['sum']['suspect']['count'])): ?>
+<?php if (!empty($rep['sum']['unverified'])): ?>
 <div class="wsr-warn">
-    <i class="bi bi-exclamation-triangle me-1"></i>
-    <strong><?= (int)$rep['sum']['suspect']['count'] ?> session(s) ran longer than 12 hours and are excluded from the totals below</strong>
-    — a card was left in In&nbsp;Progress rather than being worked that whole time.
-    <?php if ($rep['sum']['suspect']['tasks']): ?>
-    <div style="margin-top:6px;">
-        <?php foreach (array_slice($rep['sum']['suspect']['tasks'], 0, 5, true) as $tid => $secs): ?>
-        <div>· <a href="task_detail.php?id=<?= (int)$tid ?>"><?= sanitize($rep['titles'][$tid] ?? ('Task #' . $tid)) ?></a>
-            — <?= fmt_hm($secs) ?> in one stretch</div>
-        <?php endforeach; ?>
-    </div>
-    <?php endif; ?>
+    <i class="bi bi-question-circle me-1"></i>
+    <strong><?= count($rep['sum']['unverified']) ?> day(s) have no TeamLogger activity to check against</strong>
+    — <?= sanitize(implode(', ', array_map(fn($d) => date('D d M', strtotime($d)), array_slice($rep['sum']['unverified'], 0, 6)))) ?>.
+    Task time for those days is the raw timer and is marked <em>unverified</em> below.
 </div>
 <?php endif; ?>
 
@@ -2140,7 +2148,7 @@ if (!empty($flash)): ?>
     <div class="wsr-tile accent">
         <div class="v"><?= fmt_hm($r_cov) ?></div>
         <div class="l">Time on tasks</div>
-        <div class="s">Wall clock with at least one task running</div>
+        <div class="s">Clipped to TeamLogger activity — idle and breaks excluded</div>
     </div>
     <div class="wsr-tile">
         <div class="v"><?= fmt_hm($r_trk) ?></div>
@@ -2216,6 +2224,11 @@ if (!empty($flash)): ?>
 
 <div class="wsr-card">
     <h6>Daily detail</h6>
+    <div class="wsr-muted" style="margin:-6px 0 10px;">
+        <strong>On tasks</strong> counts only the time a task was open <em>and</em> TeamLogger saw you working.
+        A card left in In&nbsp;Progress stops earning when your activity stops.
+        <span style="color:#f59e0b;">*</span> marks a day with no TeamLogger data to check against.
+    </div>
     <table class="wsr-table">
         <thead><tr>
             <th>Date</th><th class="num">Worked</th><th class="num">TL active</th>
@@ -2234,7 +2247,12 @@ if (!empty($flash)): ?>
                 <td class="num"><?= $wk > 0 ? fmt_hm((int)round($wk * 3600)) : '—' ?></td>
                 <td class="num"><?= $ah > 0 ? fmt_hm((int)round($ah * 3600)) : '—' ?></td>
                 <td class="num"><?= !empty($rep['att'][$d]['ih']) ? fmt_hm((int)round((float)$rep['att'][$d]['ih'] * 3600)) : '—' ?></td>
-                <td class="num"><?= fmt_hm($cov) ?></td>
+                <td class="num">
+                    <?= fmt_hm($cov) ?>
+                    <?php if ($cov > 0 && empty($day['verified'])): ?>
+                    <span title="No TeamLogger activity for this day — raw timer value" style="color:#f59e0b;">*</span>
+                    <?php endif; ?>
+                </td>
                 <td class="num"><?= $pc === null ? '—' : $pc . '%' ?></td>
             </tr>
         <?php endforeach; ?>

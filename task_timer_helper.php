@@ -189,8 +189,10 @@ function close_stale_task_timers($conn, $user_id, $max_hours = 12) {
  * Turn raw timer intervals into per-day and per-task totals.
  *
  * Intervals are split at midnight so an evening session never credits its hours to the
- * following day, and each task's contribution to a single day is capped, since no one
- * works one task for more than $day_cap_h hours in a day.
+ * following day. Where TeamLogger activity is known for a day, each piece is then clipped
+ * to those windows — a task left In Progress overnight stops earning the moment TeamLogger
+ * says the person stopped, and idle and break time never counts. Days with no TeamLogger
+ * data fall back to raw timer time and are marked unverified rather than silently dropped.
  *
  * Two different totals come out of this, and they answer different questions:
  *   tracked = sum of every task's time. Two tasks left In Progress at once each count in
@@ -198,32 +200,19 @@ function close_stale_task_timers($conn, $user_id, $max_hours = 12) {
  *   covered = the union of the intervals, i.e. wall-clock time with at least one task
  *             running. This is the one to compare against TeamLogger's active hours.
  *
- * @param array $rows each ['task_id','started_at','ended_at']
+ * @param array $rows    each ['task_id','started_at','ended_at']
+ * @param array $windows date => list of [start_ts, end_ts] counted as working time
  */
-function summarize_task_time(array $rows, string $from, string $to, int $day_cap_h = 16, int $max_session_h = 12): array {
+function summarize_task_time(array $rows, string $from, string $to, array $windows = [], int $day_cap_h = 16): array {
     $range_start = strtotime($from . ' 00:00:00');
     $range_end   = strtotime($to   . ' 00:00:00 +1 day');
     $cap         = $day_cap_h * 3600;
-    $max_session = $max_session_h * 3600;
 
-    $days    = [];
-    $suspect = ['count' => 0, 'seconds' => 0, 'tasks' => []];
+    $days = [];
     foreach ($rows as $r) {
         $tid = (int)$r['task_id'];
-
-        // A session longer than the abandonment threshold is a card left in In Progress,
-        // not a day's work. Clamping it to a per-day ceiling would launder it into a
-        // believable 16h; excluding it and saying so keeps the totals honest.
-        $full = strtotime($r['ended_at']) - strtotime($r['started_at']);
-        if ($full > $max_session) {
-            $suspect['count']++;
-            $suspect['seconds'] += $full;
-            $suspect['tasks'][$tid] = ($suspect['tasks'][$tid] ?? 0) + $full;
-            continue;
-        }
-
-        $s = max(strtotime($r['started_at']), $range_start);
-        $e = min(strtotime($r['ended_at']),   $range_end);
+        $s   = max(strtotime($r['started_at']), $range_start);
+        $e   = min(strtotime($r['ended_at']),   $range_end);
         if ($e <= $s) continue;
 
         $cur = $s;
@@ -232,18 +221,42 @@ function summarize_task_time(array $rows, string $from, string $to, int $day_cap
             $next_day = strtotime($d . ' 00:00:00 +1 day');
             $seg_end  = min($e, $next_day);
 
-            if (!isset($days[$d])) $days[$d] = ['tasks' => [], 'intervals' => []];
-            $days[$d]['tasks'][$tid]  = ($days[$d]['tasks'][$tid] ?? 0) + ($seg_end - $cur);
-            $days[$d]['intervals'][]  = [$cur, $seg_end];
+            if (!isset($days[$d])) {
+                $days[$d] = ['tasks' => [], 'intervals' => [], 'verified' => isset($windows[$d])];
+            }
+
+            // Clip to TeamLogger's working windows when we have them for this day.
+            $pieces = [];
+            if (isset($windows[$d])) {
+                foreach ($windows[$d] as [$ws, $we]) {
+                    $ps = max($cur, $ws);
+                    $pe = min($seg_end, $we);
+                    if ($pe > $ps) $pieces[] = [$ps, $pe];
+                }
+            } else {
+                $pieces[] = [$cur, $seg_end];
+            }
+
+            foreach ($pieces as [$ps, $pe]) {
+                $days[$d]['tasks'][$tid] = ($days[$d]['tasks'][$tid] ?? 0) + ($pe - $ps);
+                $days[$d]['intervals'][] = [$ps, $pe];
+            }
 
             $cur = $seg_end;
         }
+    }
+
+    // A day can be known to have no working time at all; keep it as a verified zero.
+    foreach ($windows as $d => $_w) {
+        if (!isset($days[$d])) continue;
+        $days[$d]['verified'] = true;
     }
 
     $by_day = [];
     $by_task = [];
     $total_tracked = 0;
     $total_covered = 0;
+    $unverified = [];
 
     foreach ($days as $d => $bucket) {
         $tracked = 0;
@@ -260,24 +273,27 @@ function summarize_task_time(array $rows, string $from, string $to, int $day_cap
         usort($ivs, fn($a, $b) => $a[0] <=> $b[0]);
         $cs = $ce = null;
         foreach ($ivs as $iv) {
-            if ($cs === null)        { [$cs, $ce] = $iv; continue; }
-            if ($iv[0] <= $ce)       { $ce = max($ce, $iv[1]); continue; }
+            if ($cs === null)  { [$cs, $ce] = $iv; continue; }
+            if ($iv[0] <= $ce) { $ce = max($ce, $iv[1]); continue; }
             $covered += $ce - $cs;
             [$cs, $ce] = $iv;
         }
         if ($cs !== null) $covered += $ce - $cs;
         $covered = min($covered, $cap);
 
-        $by_day[$d] = ['tracked' => $tracked, 'covered' => $covered, 'tasks' => $bucket['tasks']];
+        $by_day[$d] = ['tracked' => $tracked, 'covered' => $covered,
+                       'tasks' => $bucket['tasks'], 'verified' => $bucket['verified']];
+        if (!$bucket['verified'] && $tracked > 0) $unverified[] = $d;
+
         $total_tracked += $tracked;
         $total_covered += $covered;
     }
 
     ksort($by_day);
     arsort($by_task);
-    arsort($suspect['tasks']);
+    sort($unverified);
     return ['days' => $by_day, 'tasks' => $by_task, 'tracked' => $total_tracked,
-            'covered' => $total_covered, 'suspect' => $suspect];
+            'covered' => $total_covered, 'unverified' => $unverified];
 }
 
 /** Seconds as "6h 12m" (or "—" for nothing). */
