@@ -277,6 +277,25 @@ try {
         count($seg_list) > 0
             ? count($seg_list) . ' segment(s) — task time for this day is clipped to these'
             : 'none — task time for this day falls back to the RAW timer and is marked unverified, which is why a task left running reads to midnight.');
+    // Cross-check the stored windows against the punch clock for the same day. A constant
+    // offset between them means the segments were written by the buggy converter and need
+    // rewriting — no amount of re-reading them will fix the numbers.
+    if ($seg_list) {
+        $seg_first = strtotime($seg_list[0]['start_at']);
+        $pin = $conn->prepare("SELECT check_in FROM attendance WHERE user_id=? AND date=? AND check_in IS NOT NULL LIMIT 1");
+        $pin->execute([$me['id'], $date]);
+        $ci = $pin->fetchColumn();
+        if ($ci) {
+            $punch_first = strtotime($date . ' ' . $ci);
+            $skew = $seg_first - $punch_first;
+            say($rows, 'Segment times line up with punch-in', abs($skew) < 3600,
+                'first segment ' . date('H:i', $seg_first) . ' vs punch-in ' . date('H:i', $punch_first)
+                . ' (' . ($skew >= 0 ? '+' : '') . round($skew / 60) . ' min)'
+                . (abs($skew) >= 3600
+                    ? ' — the windows are offset, so they were written before the timezone fix. Re-sync this date to rewrite them.'
+                    : ''));
+        }
+    }
 } catch (Exception $e) {
     say($rows, 'tl_segments table', false, 'Table does not exist yet — deploy and run one sync to create it.');
 }
