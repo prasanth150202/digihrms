@@ -148,6 +148,30 @@ if ($is_ajax && empty($_POST['action']) && !empty($_GET['action'])) {
 // Create task (TL/Admin only)
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 
+    // Bulk delete from the board. Same permission rule and same soft-delete as the single
+    // 'delete_task' path, so everything still lands in the recycle bin and stays restorable.
+    if ($_POST['action'] === 'bulk_delete_tasks') {
+        $ids = array_values(array_unique(array_filter(
+            array_map('intval', explode(',', (string)($_POST['task_ids'] ?? ''))))));
+        $deleted = 0; $denied = 0;
+        if ($ids) {
+            $in  = implode(',', $ids); // already cast to int
+            $sel = $conn->query("SELECT id, title, assigned_by, assigned_to FROM tasks
+                                 WHERE id IN ($in) AND deleted_at IS NULL");
+            $del = $conn->prepare("UPDATE tasks SET deleted_at=NOW(), deleted_by=? WHERE id=?");
+            foreach ($sel->fetchAll() as $t) {
+                if (!($is_tl || ($t['assigned_by'] == $uid && $t['assigned_to'] == $uid))) { $denied++; continue; }
+                $del->execute([$uid, (int)$t['id']]);
+                log_task_activity($conn, (int)$t['id'], $uid, 'DELETED', 'Moved to recycle bin: ' . ($t['title'] ?? ''));
+                $deleted++;
+            }
+        }
+        if ($is_ajax) ajax_ok(['deleted' => $deleted, 'denied' => $denied]);
+        set_flash($denied ? 'warning' : 'success',
+            $deleted . ' task(s) moved to recycle bin' . ($denied ? ", $denied skipped — not yours to delete" : '') . '.');
+        header('Location: tasks.php?tab=board'); exit;
+    }
+
     // Board column layout — order and visibility, per user
     if ($_POST['action'] === 'save_board_cols') {
         $valid = ['TODO','IN_PROGRESS','REWORK','BLOCKED','REVIEW','DONE'];
@@ -1932,6 +1956,13 @@ if (!empty($flash)): ?>
     color:var(--text-secondary); border-radius:6px; width:24px; height:22px; font-size:.7rem; line-height:1; }
 .wsb-cols-panel li button:hover { border-color:var(--primary); color:var(--primary); }
 .wsb-cols-actions { display:flex; gap:7px; }
+.wsb-pick { width:14px; height:14px; cursor:pointer; accent-color:var(--primary); flex-shrink:0; }
+.wsb-bulk { position:fixed; left:50%; bottom:22px; transform:translateX(-50%); z-index:1040;
+    display:flex; align-items:center; gap:10px; background:var(--card-bg);
+    border:1px solid var(--card-bdr); border-radius:30px; padding:8px 10px 8px 18px;
+    box-shadow:0 8px 28px rgba(15,23,42,.20); font-size:.82rem; font-weight:600;
+    color:var(--text-primary); }
+[data-theme="dark"] .wsb-bulk { box-shadow:0 8px 28px rgba(0,0,0,.55); }
 .wsb-board::-webkit-scrollbar { height:7px; }
 .wsb-board::-webkit-scrollbar-thumb { background:var(--wsb-col-bdr); border-radius:4px; }
 
@@ -2005,6 +2036,10 @@ if (!empty($flash)): ?>
                  data-quiz-passed="<?= in_array($t['id'], $quiz_passed_task_ids) ? '1' : '0' ?>"
                  <?= $can_drag ? 'draggable="true"' : '' ?>>
                 <div class="wsb-card-top">
+                    <?php if ($is_tl || (int)$t['assigned_by'] === (int)$uid): ?>
+                    <input type="checkbox" class="wsb-pick" data-id="<?= $tid ?>" draggable="false"
+                           title="Select for bulk actions">
+                    <?php endif; ?>
                     <?php if (!empty($t['priority'])): ?>
                     <span class="pri-badge pri-<?= sanitize($t['priority']) ?>"><?= sanitize($t['priority']) ?></span>
                     <?php endif; ?>
@@ -2044,7 +2079,50 @@ if (!empty($flash)): ?>
 <?php endforeach; ?>
 </div>
 
+<div id="wsbBulk" class="wsb-bulk" hidden>
+    <span id="wsbBulkCount"></span>
+    <button type="button" class="btn btn-sm btn-danger" onclick="wsbBulkDelete()">
+        <i class="bi bi-trash3 me-1"></i>Delete
+    </button>
+    <button type="button" class="btn btn-sm btn-light" onclick="wsbBulkClear()">Clear</button>
+</div>
+<form method="POST" id="wsbBulkForm" class="d-none">
+    <input type="hidden" name="action" value="bulk_delete_tasks">
+    <input type="hidden" name="task_ids" id="wsbBulkIds">
+</form>
+
 <script>
+function wsbPicked() {
+    return Array.from(document.querySelectorAll('.wsb-pick:checked')).map(function (c) { return c.dataset.id; });
+}
+function wsbSyncBar() {
+    var n = wsbPicked().length;
+    document.getElementById('wsbBulk').hidden = n === 0;
+    document.getElementById('wsbBulkCount').textContent = n + ' selected';
+}
+function wsbBulkClear() {
+    document.querySelectorAll('.wsb-pick:checked').forEach(function (c) { c.checked = false; });
+    wsbSyncBar();
+}
+function wsbBulkDelete() {
+    var ids = wsbPicked();
+    if (!ids.length) return;
+    hConfirm('Move ' + ids.length + ' task(s) to the recycle bin? They can be restored from the Bin tab.',
+             { title: 'Delete selected', ok: 'Delete ' + ids.length })
+        .then(function (ok) {
+            if (!ok) return;
+            document.getElementById('wsbBulkIds').value = ids.join(',');
+            document.getElementById('wsbBulkForm').submit();
+        });
+}
+document.addEventListener('change', function (e) {
+    if (e.target.classList && e.target.classList.contains('wsb-pick')) wsbSyncBar();
+});
+// Starting a drag on the checkbox would drag the card instead of ticking it.
+document.addEventListener('dragstart', function (e) {
+    if (e.target.classList && e.target.classList.contains('wsb-pick')) { e.preventDefault(); e.stopPropagation(); }
+}, true);
+
 function wsbMove(btn, dir) {
     var li = btn.closest('li');
     var sib = dir < 0 ? li.previousElementSibling : li.nextElementSibling;
