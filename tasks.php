@@ -2062,6 +2062,9 @@ if (!empty($flash)): ?>
     border-radius:8px; padding:8px 11px; margin-bottom:14px; }
 [data-theme="dark"] .wsr-warn { color:#fcd34d; }
 .wsr-muted { color:var(--text-muted); font-size:.8rem; }
+.wsr-slices { margin-top:3px; font-size:.66rem; color:var(--text-muted); font-weight:500;
+    display:flex; gap:5px; justify-content:flex-end; flex-wrap:wrap; }
+.wsr-slices span { background:rgba(59,130,246,.10); border-radius:4px; padding:0 4px; white-space:nowrap; }
 </style>
 
 <div class="wsr">
@@ -2228,6 +2231,8 @@ if (!empty($flash)): ?>
         <strong>On tasks</strong> counts only the time a task was open <em>and</em> TeamLogger saw you working.
         A card left in In&nbsp;Progress stops earning when your activity stops.
         <span style="color:#f59e0b;">*</span> marks a day with no TeamLogger data to check against.
+        The small times under each figure are the exact periods counted — gaps between them are
+        gaps where TeamLogger saw nothing, so they were not counted.
     </div>
     <table class="wsr-table">
         <thead><tr>
@@ -2251,6 +2256,14 @@ if (!empty($flash)): ?>
                     <?= fmt_hm($cov) ?>
                     <?php if ($cov > 0 && empty($day['verified'])): ?>
                     <span title="No TeamLogger activity for this day — raw timer value" style="color:#f59e0b;">*</span>
+                    <?php endif; ?>
+                    <?php if (!empty($day['slices'])): ?>
+                    <div class="wsr-slices">
+                        <?php foreach (array_slice($day['slices'], 0, 6) as [$ss, $se]): ?>
+                        <span><?= date('H:i', $ss) ?>–<?= date('H:i', $se) ?></span>
+                        <?php endforeach; ?>
+                        <?php if (count($day['slices']) > 6): ?><span>+<?= count($day['slices']) - 6 ?></span><?php endif; ?>
+                    </div>
                     <?php endif; ?>
                 </td>
                 <td class="num"><?= $pc === null ? '—' : $pc . '%' ?></td>

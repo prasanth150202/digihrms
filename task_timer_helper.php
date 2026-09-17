@@ -286,8 +286,11 @@ function summarize_task_time(array $rows, string $from, string $to, array $windo
             $by_task[$tid] = ($by_task[$tid] ?? 0) + $secs;
         }
 
-        // Union of intervals — overlapping work counts once against wall-clock time.
+        // Union of intervals — overlapping work counts once against wall-clock time. The
+        // merged pieces are kept so the report can show exactly which minutes it counted,
+        // which is the only way to tell an excluded break from a missing one.
         $covered = 0;
+        $slices  = [];
         $ivs = $bucket['intervals'];
         usort($ivs, fn($a, $b) => $a[0] <=> $b[0]);
         $cs = $ce = null;
@@ -295,12 +298,13 @@ function summarize_task_time(array $rows, string $from, string $to, array $windo
             if ($cs === null)  { [$cs, $ce] = $iv; continue; }
             if ($iv[0] <= $ce) { $ce = max($ce, $iv[1]); continue; }
             $covered += $ce - $cs;
+            $slices[] = [$cs, $ce];
             [$cs, $ce] = $iv;
         }
-        if ($cs !== null) $covered += $ce - $cs;
+        if ($cs !== null) { $covered += $ce - $cs; $slices[] = [$cs, $ce]; }
         $covered = min($covered, $cap);
 
-        $by_day[$d] = ['tracked' => $tracked, 'covered' => $covered,
+        $by_day[$d] = ['tracked' => $tracked, 'covered' => $covered, 'slices' => $slices,
                        'tasks' => $bucket['tasks'], 'verified' => $bucket['verified']];
         if (!$bucket['verified'] && $tracked > 0) $unverified[] = $d;
 

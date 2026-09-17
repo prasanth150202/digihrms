@@ -88,6 +88,20 @@ say($rows, 'API key configured', $api_key !== '',
                     : 'present (' . strlen($api_key) . ' chars, ends …' . substr($api_key, -4) . ')');
 say($rows, 'Day window settings', true, "timezoneOffsetMinutes=$tz, dayStartsAtHours=$day_start, dayEndsAtHours=$day_end");
 
+// ── 1a. Deployed file versions ────────────────────────────
+// Several rounds of debugging were spent on symptoms caused by the server running older
+// files than the repo. Show when each one was last written so that is obvious immediately.
+foreach (['teamlogger_sync_day.php', 'task_timer_helper.php', 'tasks.php', 'diag_teamlogger.php'] as $f) {
+    $path = __DIR__ . '/' . $f;
+    $mt   = file_exists($path) ? filemtime($path) : 0;
+    say($rows, "File: $f", $mt > 0,
+        $mt ? date('Y-m-d H:i', $mt) . ' (' . round((time() - $mt) / 3600, 1) . 'h ago)' : 'missing');
+}
+// Bump when changing the segment timestamp maths, so a stale deploy is self-evident.
+define('DIAG_BUILD', 'segments-utc-fix-2');
+say($rows, 'Diagnostic build', true, DIAG_BUILD
+    . ' — if the sync still writes shifted segments while this reads "segments-utc-fix-2", the sync file did not deploy.');
+
 // ── 1b. Clocks ────────────────────────────────────────────
 // Task timers are stamped by MySQL (CURRENT_TIMESTAMP); activity segments are written by
 // PHP. Clipping one against the other only works if both clocks agree — a gap here shifts
