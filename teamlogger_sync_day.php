@@ -157,16 +157,85 @@ foreach ($tl_users as $tu) {
     }
 }
 
+// Cache user lookups within this request
+$user_cache = [];
+$get_user = function(string $emp_code, string $email, ?string $guid = null, string $name = '', &$via = null) use ($conn, &$user_cache): ?int {
+    $key = $emp_code . '|' . $email . '|' . (string)$guid . '|' . $name;
+    if (array_key_exists($key, $user_cache)) return $user_cache[$key];
+    $uid = null;
+    // tl_guid first: it is the explicit link set by the "map user" screen in teamlogger.php,
+    // so it should win over guessing by code or address.
+    if ($guid) {
+        try {
+            $s = $conn->prepare("SELECT id FROM users WHERE tl_guid=? LIMIT 1");
+            $s->execute([$guid]); $uid = $s->fetchColumn() ?: null;
+        } catch (Exception $e) { /* column not present on this install */ }
+    }
+    // Explicit alias set by a human on the diagnostic page. Some TeamLogger people send
+    // only a name, and it need not spell the same as the HRMS one, so this is the only
+    // durable link available for them.
+    if (!$uid && $name !== '') {
+        try {
+            $s = $conn->prepare("SELECT id FROM users WHERE LOWER(TRIM(tl_name))=? LIMIT 1");
+            $s->execute([mb_strtolower(trim($name))]);
+            $uid = $s->fetchColumn() ?: null;
+            if ($uid) $via = 'tl_name';
+        } catch (Exception $e) { /* column not present on this install */ }
+    }
+    if (!$uid && $emp_code) {
+        $s = $conn->prepare("SELECT id FROM users WHERE UPPER(emp_no)=? LIMIT 1");
+        $s->execute([$emp_code]); $uid = $s->fetchColumn() ?: null;
+    }
+    if (!$uid && $email) {
+        $s = $conn->prepare("SELECT id FROM users WHERE LOWER(email)=? LIMIT 1");
+        $s->execute([strtolower($email)]); $uid = $s->fetchColumn() ?: null;
+        if ($uid) $via = 'email';
+    } elseif ($uid && !$via) { $via = $guid ? 'tl_guid' : 'emp_no'; }
+
+    // Last resort. Some TeamLogger people carry neither a code nor an address, leaving the
+    // name as the only key in existence. Accept it only when exactly one HRMS user bears
+    // that name — a second match means we cannot tell whose hours these are, and guessing
+    // would file someone's day under a colleague.
+    if (!$uid && $name !== '') {
+        $s = $conn->prepare("SELECT id FROM users WHERE LOWER(TRIM(name))=? LIMIT 2");
+        $s->execute([mb_strtolower(trim($name))]);
+        $ids = $s->fetchAll(PDO::FETCH_COLUMN);
+        if (count($ids) === 1) { $uid = (int)$ids[0]; $via = 'name'; }
+    }
+    return $user_cache[$key] = $uid;
+};
+
 // One place that decides which TeamLogger account a punch row belongs to. Both the
 // timesheet fetch and the DB write use it — they resolved this separately before, drifted
 // apart, and people with no employee code silently lost their idle/meeting data.
-$resolve_guid = function (array $row) use ($guid_by_code, $guid_by_email, $guid_by_name): ?string {
+$resolve_guid = function (array $row) use ($guid_by_code, $guid_by_email, $guid_by_name, $get_user, $conn): ?string {
     $c = strtoupper(trim($row['employeeCode'] ?? $row['empCode'] ?? $row['code'] ?? $row['employeeId'] ?? ''));
     $e = strtolower(trim($row['employeeEmail'] ?? $row['email'] ?? ''));
     $n = mb_strtolower(trim($row['employeeName'] ?? $row['name'] ?? $row['fullName'] ?? $row['username'] ?? ''));
     $g = ($c ? ($guid_by_code[$c] ?? null) : null)
       ?? ($e ? ($guid_by_email[$e] ?? null) : null)
       ?? ($n ? ($guid_by_name[$n] ?? null) : null);
+
+    // Nothing on the punch row reaches the roster. Go via HRMS instead: someone linked by
+    // alias has a record here that knows their address, and the roster is indexed by it.
+    // Without this they get attendance but never a timesheet, so no idle and no segments —
+    // which silently leaves their task time unclipped.
+    if ($g === null) {
+        $uid = $get_user($c, $e, null, $n);
+        if ($uid) {
+            try {
+                $q = $conn->prepare("SELECT tl_guid, email FROM users WHERE id=? LIMIT 1");
+                $q->execute([$uid]);
+                if ($hu = $q->fetch()) {
+                    if (!empty($hu['tl_guid'])) {
+                        $g = $hu['tl_guid'];
+                    } elseif (!empty($hu['email'])) {
+                        $g = $guid_by_email[strtolower(trim($hu['email']))] ?? null;
+                    }
+                }
+            } catch (Exception $ex) { /* ignore */ }
+        }
+    }
     return $g !== null ? (string)$g : null;
 };
 
@@ -245,54 +314,6 @@ if ($ts_requests) {
 
 // ── 4. Write to DB ────────────────────────────────────────
 $conn->prepare("DELETE FROM attendance WHERE date=? AND source='TEAMLOGGER'")->execute([$date]);
-
-// Cache user lookups within this request
-$user_cache = [];
-$get_user = function(string $emp_code, string $email, ?string $guid = null, string $name = '', &$via = null) use ($conn, &$user_cache): ?int {
-    $key = $emp_code . '|' . $email . '|' . (string)$guid . '|' . $name;
-    if (array_key_exists($key, $user_cache)) return $user_cache[$key];
-    $uid = null;
-    // tl_guid first: it is the explicit link set by the "map user" screen in teamlogger.php,
-    // so it should win over guessing by code or address.
-    if ($guid) {
-        try {
-            $s = $conn->prepare("SELECT id FROM users WHERE tl_guid=? LIMIT 1");
-            $s->execute([$guid]); $uid = $s->fetchColumn() ?: null;
-        } catch (Exception $e) { /* column not present on this install */ }
-    }
-    // Explicit alias set by a human on the diagnostic page. Some TeamLogger people send
-    // only a name, and it need not spell the same as the HRMS one, so this is the only
-    // durable link available for them.
-    if (!$uid && $name !== '') {
-        try {
-            $s = $conn->prepare("SELECT id FROM users WHERE LOWER(TRIM(tl_name))=? LIMIT 1");
-            $s->execute([mb_strtolower(trim($name))]);
-            $uid = $s->fetchColumn() ?: null;
-            if ($uid) $via = 'tl_name';
-        } catch (Exception $e) { /* column not present on this install */ }
-    }
-    if (!$uid && $emp_code) {
-        $s = $conn->prepare("SELECT id FROM users WHERE UPPER(emp_no)=? LIMIT 1");
-        $s->execute([$emp_code]); $uid = $s->fetchColumn() ?: null;
-    }
-    if (!$uid && $email) {
-        $s = $conn->prepare("SELECT id FROM users WHERE LOWER(email)=? LIMIT 1");
-        $s->execute([strtolower($email)]); $uid = $s->fetchColumn() ?: null;
-        if ($uid) $via = 'email';
-    } elseif ($uid && !$via) { $via = $guid ? 'tl_guid' : 'emp_no'; }
-
-    // Last resort. Some TeamLogger people carry neither a code nor an address, leaving the
-    // name as the only key in existence. Accept it only when exactly one HRMS user bears
-    // that name — a second match means we cannot tell whose hours these are, and guessing
-    // would file someone's day under a colleague.
-    if (!$uid && $name !== '') {
-        $s = $conn->prepare("SELECT id FROM users WHERE LOWER(TRIM(name))=? LIMIT 2");
-        $s->execute([mb_strtolower(trim($name))]);
-        $ids = $s->fetchAll(PDO::FETCH_COLUMN);
-        if (count($ids) === 1) { $uid = (int)$ids[0]; $via = 'name'; }
-    }
-    return $user_cache[$key] = $uid;
-};
 
 $synced = 0; $skipped = 0;
 // A row still inserts when no HRMS user matches, just with user_id NULL — which makes it
