@@ -304,6 +304,19 @@ function summarize_task_time(array $rows, string $from, string $to, array $windo
         if ($cs !== null) { $covered += $ce - $cs; $slices[] = [$cs, $ce]; }
         $covered = min($covered, $cap);
 
+        // TeamLogger emits zero-length and one-minute fragments, and stretches split a few
+        // seconds apart read as separate periods. Join anything under a minute apart and
+        // drop what is left under a minute, so this is legible rather than literal.
+        $clean = [];
+        foreach ($slices as [$ss, $se]) {
+            if ($clean && $ss - $clean[count($clean) - 1][1] < 60) {
+                $clean[count($clean) - 1][1] = max($clean[count($clean) - 1][1], $se);
+                continue;
+            }
+            $clean[] = [$ss, $se];
+        }
+        $slices = array_values(array_filter($clean, fn($x) => $x[1] - $x[0] >= 60));
+
         $by_day[$d] = ['tracked' => $tracked, 'covered' => $covered, 'slices' => $slices,
                        'tasks' => $bucket['tasks'], 'verified' => $bucket['verified']];
         if (!$bucket['verified'] && $tracked > 0) $unverified[] = $d;

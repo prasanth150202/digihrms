@@ -885,12 +885,13 @@ if ($workspace_beta && ($tab === 'report' || isset($_GET['export']))) {
     $rep_rows = $rq->fetchAll();
 
     // TeamLogger's working windows for this person. Task time gets clipped to these, so a
-    // card left In Progress overnight stops earning when they actually stopped. Meetings
-    // count as work; idle and break deliberately do not.
+    // card left In Progress overnight stops earning when they actually stopped. Idle counts
+    // — sitting at the desk thinking is still working the task. Breaks and time when
+    // TeamLogger was not recording at all do not.
     $rep_windows = [];
     try {
         $sq = $conn->prepare("SELECT date, start_at, end_at FROM tl_segments
-            WHERE user_id=? AND date>=? AND date<=? AND type IN ('active','meeting')
+            WHERE user_id=? AND date>=? AND date<=? AND type IN ('active','meeting','idle')
             ORDER BY start_at");
         $sq->execute([$rep_uid, $rep_from, $rep_to]);
         foreach ($sq->fetchAll() as $sg) {
@@ -2062,9 +2063,6 @@ if (!empty($flash)): ?>
     border-radius:8px; padding:8px 11px; margin-bottom:14px; }
 [data-theme="dark"] .wsr-warn { color:#fcd34d; }
 .wsr-muted { color:var(--text-muted); font-size:.8rem; }
-.wsr-slices { margin-top:3px; font-size:.66rem; color:var(--text-muted); font-weight:500;
-    display:flex; gap:5px; justify-content:flex-end; flex-wrap:wrap; }
-.wsr-slices span { background:rgba(59,130,246,.10); border-radius:4px; padding:0 4px; white-space:nowrap; }
 </style>
 
 <div class="wsr">
@@ -2151,7 +2149,7 @@ if (!empty($flash)): ?>
     <div class="wsr-tile accent">
         <div class="v"><?= fmt_hm($r_cov) ?></div>
         <div class="l">Time on tasks</div>
-        <div class="s">Clipped to TeamLogger activity — idle and breaks excluded</div>
+        <div class="s">Clipped to TeamLogger's recording — breaks excluded, idle counted</div>
     </div>
     <div class="wsr-tile">
         <div class="v"><?= fmt_hm($r_trk) ?></div>
@@ -2228,11 +2226,11 @@ if (!empty($flash)): ?>
 <div class="wsr-card">
     <h6>Daily detail</h6>
     <div class="wsr-muted" style="margin:-6px 0 10px;">
-        <strong>On tasks</strong> counts only the time a task was open <em>and</em> TeamLogger saw you working.
-        A card left in In&nbsp;Progress stops earning when your activity stops.
+        <strong>On tasks</strong> counts the time a task was open <em>and</em> TeamLogger was recording —
+        idle time at your desk included. Breaks and time with TeamLogger off are excluded, so a card left
+        in In&nbsp;Progress stops earning once you stop.
         <span style="color:#f59e0b;">*</span> marks a day with no TeamLogger data to check against.
-        The small times under each figure are the exact periods counted — gaps between them are
-        gaps where TeamLogger saw nothing, so they were not counted.
+        Hover a figure to see the exact periods counted.
     </div>
     <table class="wsr-table">
         <thead><tr>
@@ -2252,18 +2250,17 @@ if (!empty($flash)): ?>
                 <td class="num"><?= $wk > 0 ? fmt_hm((int)round($wk * 3600)) : '—' ?></td>
                 <td class="num"><?= $ah > 0 ? fmt_hm((int)round($ah * 3600)) : '—' ?></td>
                 <td class="num"><?= !empty($rep['att'][$d]['ih']) ? fmt_hm((int)round((float)$rep['att'][$d]['ih'] * 3600)) : '—' ?></td>
-                <td class="num">
+                <?php
+                $slice_txt = '';
+                if (!empty($day['slices'])) {
+                    $slice_txt = 'Counted: ' . implode(', ', array_map(
+                        fn($x) => date('H:i', $x[0]) . '-' . date('H:i', $x[1]), $day['slices']));
+                }
+                ?>
+                <td class="num"<?= $slice_txt ? ' title="' . sanitize($slice_txt) . '"' : '' ?>>
                     <?= fmt_hm($cov) ?>
                     <?php if ($cov > 0 && empty($day['verified'])): ?>
                     <span title="No TeamLogger activity for this day — raw timer value" style="color:#f59e0b;">*</span>
-                    <?php endif; ?>
-                    <?php if (!empty($day['slices'])): ?>
-                    <div class="wsr-slices">
-                        <?php foreach (array_slice($day['slices'], 0, 6) as [$ss, $se]): ?>
-                        <span><?= date('H:i', $ss) ?>–<?= date('H:i', $se) ?></span>
-                        <?php endforeach; ?>
-                        <?php if (count($day['slices']) > 6): ?><span>+<?= count($day['slices']) - 6 ?></span><?php endif; ?>
-                    </div>
                     <?php endif; ?>
                 </td>
                 <td class="num"><?= $pc === null ? '—' : $pc . '%' ?></td>

@@ -453,13 +453,13 @@ say($rows, "Your own rows, $from → $date", count($mineRows) > 0,
 
 <?php if ($seg_list): ?>
 <h1 style="font-size:16px;margin:0 0 4px;">Your activity windows on <?= htmlspecialchars($date) ?></h1>
-<div class="sub">Task time is counted only inside the <code>active</code> and <code>meeting</code> rows.</div>
+<div class="sub">Task time is counted inside <code>active</code>, <code>idle</code> and <code>meeting</code> rows. <code>break</code> rows and the gaps between rows are not counted.</div>
 <table>
     <tr><th>Type</th><th>From</th><th>To</th><th>Length</th></tr>
     <?php foreach ($seg_list as $sg):
         $len = strtotime($sg['end_at']) - strtotime($sg['start_at']); ?>
     <tr>
-        <td class="<?= in_array($sg['type'], ['active','meeting'], true) ? 'ok' : '' ?>"><?= htmlspecialchars($sg['type']) ?></td>
+        <td class="<?= in_array($sg['type'], ['active','meeting','idle'], true) ? 'ok' : 'bad' ?>"><?= htmlspecialchars($sg['type']) ?></td>
         <td><?= htmlspecialchars(substr($sg['start_at'], 11, 5)) ?></td>
         <td><?= htmlspecialchars(substr($sg['end_at'], 11, 5)) ?></td>
         <td><?= (int)floor($len / 3600) ?>h <?= (int)floor(($len % 3600) / 60) ?>m</td>

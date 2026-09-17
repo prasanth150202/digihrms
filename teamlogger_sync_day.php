@@ -288,13 +288,18 @@ if ($ts_requests) {
             $dur_h   = ($en - $st) / 3600000;
             $idle_h  = (float)($e['idleHours'] ?? 0);
             $meeting = !empty($e['meetingMode']);
+            $off     = !empty($e['isOffComputer']);
             // startTime/endTime are true UTC epochs — the same space as $start_ms, which is
             // built by subtracting the offset from UTC midnight. date() already renders in
             // the app timezone, so adding the offset again would shift every window forward
             // by a whole working day's worth of hours.
             $l_start = intdiv($st, 1000);
             $l_end   = intdiv($en, 1000);
-            if ($meeting) {
+            if ($off) {
+                // Away from the machine. Recorded so the timeline is complete, but never
+                // counted as working time — this is the break the report must exclude.
+                $segs[] = ['break', $l_start, $l_end];
+            } elseif ($meeting) {
                 $t['meeting'] += $dur_h;
                 $segs[] = ['meeting', $l_start, $l_end];
             } else {
