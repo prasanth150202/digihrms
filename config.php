@@ -27,6 +27,13 @@ try {
     $conn = new PDO("mysql:host=$host;dbname=$db_name;charset=utf8", $username, $password);
     $conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
     $conn->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
+
+    // The server's MySQL runs UTC while PHP runs Asia/Kolkata, so NOW() and date() were
+    // 5h30m apart. Anything comparing a MySQL-stamped row against a PHP-written one was
+    // silently wrong. Pin the session to the app's own timezone so both agree.
+    try {
+        $conn->exec("SET time_zone = '" . date('P') . "'");
+    } catch (PDOException $e) { /* server without tz tables — leave as-is */ }
 } catch (PDOException $e) {
     die("<div style='font-family:sans-serif;padding:40px;color:red;'>DB Connection Failed: " . $e->getMessage() . "</div>");
 }
