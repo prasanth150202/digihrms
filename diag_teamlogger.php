@@ -223,6 +223,54 @@ if ($api_key !== '' && !empty($entries)) {
 }
 
 // ── 4. What actually landed in the DB ─────────────────────
+// ── 4b. Activity segments — what task time gets clipped to ──
+$my_guid = null;
+foreach ($map_rows as $mr) {
+    if ($mr['hit'] && (int)$mr['hit']['id'] === (int)$me['id']) { $my_guid = $mr['guid']; break; }
+}
+$seg_list = [];
+try {
+    $q = $conn->prepare("SELECT COUNT(*) FROM tl_segments WHERE date=?");
+    $q->execute([$date]);
+    $seg_all = (int)$q->fetchColumn();
+
+    $q2 = $conn->prepare("SELECT type, start_at, end_at FROM tl_segments WHERE user_id=? AND date=? ORDER BY start_at");
+    $q2->execute([$me['id'], $date]);
+    $seg_list = $q2->fetchAll();
+
+    say($rows, "Segments stored for $date", $seg_all > 0,
+        $seg_all . ' row(s) company-wide' . ($seg_all === 0
+            ? ' — nothing has been synced since the segment feature went live. Re-run the sync for this date.' : ''));
+    say($rows, 'Your segments for that day', count($seg_list) > 0,
+        count($seg_list) > 0
+            ? count($seg_list) . ' segment(s) — task time for this day is clipped to these'
+            : 'none — task time for this day falls back to the RAW timer and is marked unverified, which is why a task left running reads to midnight.');
+} catch (Exception $e) {
+    say($rows, 'tl_segments table', false, 'Table does not exist yet — deploy and run one sync to create it.');
+}
+
+// Live check: does TeamLogger actually return timesheet data for you on this date?
+if ($api_key !== '' && $my_guid) {
+    $offset_s = (int)$tz * 60;
+    $base_utc = strtotime($date . ' 00:00:00 UTC');
+    $ts = tl_diag_api('/api/timesheet_data', $api_key, [
+        'startTime' => ($base_utc - $offset_s) * 1000,
+        'endTime'   => ($base_utc - $offset_s + 86399) * 1000,
+        'accountId' => $my_guid,
+    ]);
+    if (isset($ts['error'])) {
+        say($rows, 'Live timesheet_data for you', false, $ts['error']);
+    } else {
+        $te = isset($ts[0]) ? $ts : ($ts['data'] ?? []);
+        say($rows, 'Live timesheet_data for you', count($te) > 0,
+            count($te) . ' interval(s) returned' . (count($te) === 0
+                ? ' — TeamLogger has no interval detail for you on this date, so nothing can be clipped.' : ''));
+    }
+} elseif ($api_key !== '') {
+    say($rows, 'Live timesheet_data for you', false,
+        'No TeamLogger account id resolved for you, so no timesheet call is made and no segments are stored.');
+}
+
 $from = date('Y-m-d', strtotime($date . ' -6 days'));
 $a1 = $conn->prepare("SELECT COUNT(*) FROM attendance WHERE date=? AND source='TEAMLOGGER'");
 $a1->execute([$date]);
@@ -333,6 +381,23 @@ say($rows, "Your own rows, $from → $date", count($mineRows) > 0,
                 <div style="font-size:11.5px;color:#64748b;margin-top:3px;"><?= htmlspecialchars($r['hint']) ?></div>
             <?php endif; ?>
         </td>
+    </tr>
+    <?php endforeach; ?>
+</table>
+<?php endif; ?>
+
+<?php if ($seg_list): ?>
+<h1 style="font-size:16px;margin:0 0 4px;">Your activity windows on <?= htmlspecialchars($date) ?></h1>
+<div class="sub">Task time is counted only inside the <code>active</code> and <code>meeting</code> rows.</div>
+<table>
+    <tr><th>Type</th><th>From</th><th>To</th><th>Length</th></tr>
+    <?php foreach ($seg_list as $sg):
+        $len = strtotime($sg['end_at']) - strtotime($sg['start_at']); ?>
+    <tr>
+        <td class="<?= in_array($sg['type'], ['active','meeting'], true) ? 'ok' : '' ?>"><?= htmlspecialchars($sg['type']) ?></td>
+        <td><?= htmlspecialchars(substr($sg['start_at'], 11, 5)) ?></td>
+        <td><?= htmlspecialchars(substr($sg['end_at'], 11, 5)) ?></td>
+        <td><?= (int)floor($len / 3600) ?>h <?= (int)floor(($len % 3600) / 60) ?>m</td>
     </tr>
     <?php endforeach; ?>
 </table>
