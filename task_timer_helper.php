@@ -183,6 +183,50 @@ function resume_in_progress_timers($conn, $user_id) {
 }
 
 /**
+ * Close timers left running on tasks that are no longer In Progress.
+ *
+ * Only a drag on the board (update_status) and the status form on task_detail stop a
+ * timer. Submit for review, approve, reject, block, quick edit, delete, the API and
+ * automations all move a card out of In Progress and leave its timer open — and the report
+ * reads an open timer as running until now, so a finished task kept earning every day.
+ *
+ * Each orphan is ended when the task actually left In Progress: the first status change
+ * logged after the timer started. With no such log, the task's deletion or last update
+ * stands in; failing that it closes at its own start and counts nothing. Marked
+ * auto_closed so the report flags it.
+ */
+function close_orphan_task_timers($conn): int {
+    try {
+        $rows = $conn->query("SELECT tt.id, tt.task_id,
+                GREATEST(tt.started_at, LEAST(NOW(), COALESCE(
+                    (SELECT MIN(al.created_at) FROM task_activity_logs al
+                      WHERE al.task_id = tt.task_id AND al.created_at >= tt.started_at
+                        AND (al.action IN ('SUBMITTED','APPROVED','REJECTED','BLOCKED','DELETED')
+                             OR (al.action = 'STATUS_CHANGED'
+                                 AND (al.detail LIKE '%→%' OR al.detail LIKE 'status changed to%')
+                                 AND al.detail NOT LIKE '%→ IN_PROGRESS'
+                                 AND al.detail NOT LIKE 'status changed to IN_PROGRESS'))),
+                    t.deleted_at, t.updated_at, tt.started_at))) AS end_at
+            FROM task_timers tt
+            JOIN tasks t ON t.id = tt.task_id
+            WHERE tt.ended_at IS NULL
+              AND (t.status <> 'IN_PROGRESS' OR t.deleted_at IS NOT NULL)")->fetchAll();
+        $upd = $conn->prepare("UPDATE task_timers
+            SET ended_at = ?, duration_seconds = TIMESTAMPDIFF(SECOND, started_at, ?), auto_closed = 1
+            WHERE id = ? AND ended_at IS NULL");
+        $flag = $conn->prepare("UPDATE tasks SET timer_status='INACTIVE', timer_started_at=NULL WHERE id=?");
+        foreach ($rows as $r) {
+            $upd->execute([$r['end_at'], $r['end_at'], $r['id']]);
+            $flag->execute([$r['task_id']]);
+        }
+        return count($rows);
+    } catch (Exception $e) {
+        error_log("Orphan timer close error: " . $e->getMessage());
+        return 0;
+    }
+}
+
+/**
  * Turn raw timer intervals into per-day and per-task totals.
  *
  * Intervals are split at midnight so an evening session never credits its hours to the

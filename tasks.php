@@ -45,6 +45,10 @@ if ($workspace_beta) $pageTitle = 'Workspace';
 // an overnight gap earns nothing regardless of whether the timer was still open.
 if ($workspace_beta) resume_in_progress_timers($conn, $uid);
 
+// And the reverse: a timer still open on a card that has left In Progress by any route
+// other than the board drag. One query when there is nothing to close.
+close_orphan_task_timers($conn);
+
 function log_task_activity($conn, $task_id, $user_id, $action, $detail = '') {
     $conn->prepare("INSERT INTO task_activity_logs (task_id,user_id,action,detail) VALUES (?,?,?,?)")
          ->execute([$task_id, $user_id, $action, $detail]);
@@ -2319,7 +2323,8 @@ function wsbResetCols(form) {
 <?php if ($rep['auto']): ?>
 <div class="wsr-warn">
     <i class="bi bi-exclamation-triangle me-1"></i>
-    Some sessions below were closed automatically after running 12 hours — a card was left in In&nbsp;Progress. Those durations are a ceiling, not measured work.
+    Some sessions below were closed automatically — the card left In&nbsp;Progress without its timer
+    being stopped, so the end time is taken from the task's history. Treat those durations as estimates.
 </div>
 <?php endif; ?>
 
