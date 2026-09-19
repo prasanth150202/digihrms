@@ -906,7 +906,7 @@ function rep_load($conn, array $uids, string $from, string $to): array {
     // at zero; matching on the assignee reads those older rows correctly too.
     $rq = $conn->prepare("SELECT COALESCE(t.assigned_to, tt.user_id) AS owner,
             tt.task_id, tt.started_at, tt.auto_closed,
-            COALESCE(tt.ended_at, NOW()) AS ended_at, t.title, t.project_id, p.name AS project_name
+            COALESCE(tt.ended_at, NOW()) AS ended_at, t.title, t.status, t.project_id, p.name AS project_name
         FROM task_timers tt
         JOIN tasks t ON t.id = tt.task_id
         LEFT JOIN projects p ON p.id = t.project_id
@@ -917,11 +917,12 @@ function rep_load($conn, array $uids, string $from, string $to): array {
         ORDER BY tt.started_at");
     $rq->execute([$to, $from]);
     $rows = [];
-    $titles = []; $task_proj = []; $proj_name = ['' => 'No project'];
+    $titles = []; $task_status = []; $task_proj = []; $proj_name = ['' => 'No project'];
     foreach ($rq->fetchAll() as $r) {
         $rows[(int)$r['owner']][] = $r;
         $tid = (int)$r['task_id'];
         $titles[$tid] = $r['title'];
+        $task_status[$tid] = $r['status'];
         $pk = !empty($r['project_id']) ? (string)(int)$r['project_id'] : '';
         $task_proj[$tid] = $pk;
         if ($pk !== '') $proj_name[$pk] = $r['project_name'] ?: ('Project #' . $pk);
@@ -999,7 +1000,8 @@ function rep_load($conn, array $uids, string $from, string $to): array {
         ];
     }
 
-    return ['days' => $days, 'people' => $people, 'titles' => $titles, 'task_proj' => $task_proj,
+    return ['days' => $days, 'people' => $people, 'titles' => $titles, 'status' => $task_status,
+            'task_proj' => $task_proj,
             'proj_name' => $proj_name, 'att_ok' => $att_ok];
 }
 
@@ -1059,7 +1061,7 @@ if ($workspace_beta && ($tab === 'report' || isset($_GET['export']))) {
         'uid' => $rep_uid, 'from' => $rep_from, 'to' => $rep_to, 'team' => $rep_team,
         'picked' => $rep_ids, 'qs' => $rep_qs,
         'people' => $rep_people, 'days' => $rep_days, 'sum' => $P['sum'], 'denied' => $rep_denied,
-        'titles' => $rep_titles, 'auto' => $P['auto'],
+        'titles' => $rep_titles, 'status' => $rep_load['status'], 'auto' => $P['auto'],
         'projects' => $P['projects'], 'proj_name' => $rep_proj_name, 'task_proj' => $rep_task_proj,
         'att' => $P['att'], 'att_ok' => $rep_att_ok, 'active_total' => $P['active_total'],
         'windows' => $P['windows'],

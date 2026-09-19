@@ -161,6 +161,74 @@ $tv_link = fn($pid) => '?tab=report&amp;user=' . (int)$pid . '&amp;from=' . urle
     </div>
 </div>
 
+<?php
+// Every task anyone in the selection spent time on. A task can carry time from more than one
+// person (reassigned, or shared), so their shares are added and the names listed.
+$tv_tasks = [];
+foreach ($rep['members'] as $pid => $pd) {
+    foreach ($pd['sum']['tasks'] as $tid => $secs) {
+        if (!isset($tv_tasks[$tid])) $tv_tasks[$tid] = ['secs' => 0, 'people' => []];
+        $tv_tasks[$tid]['secs'] += $secs;
+        $tv_tasks[$tid]['people'][$pid] = ($tv_tasks[$tid]['people'][$pid] ?? 0) + $secs;
+    }
+}
+uasort($tv_tasks, fn($a, $b) => $b['secs'] <=> $a['secs']);
+$tv_auto = [];
+foreach ($rep['members'] as $pd) $tv_auto += $pd['auto'];
+$tv_status_color = ['IN_PROGRESS' => '#2563eb', 'DONE' => '#16a34a', 'REVIEW' => '#7c3aed',
+                    'BLOCKED' => '#dc2626', 'REWORK' => '#ea580c', 'TODO' => '#64748b'];
+?>
+
+<div class="wsr-card">
+    <h6>By task</h6>
+    <?php if (!$tv_tasks): ?>
+    <div class="wsr-muted">Nothing was tracked in this range.</div>
+    <?php else: ?>
+    <div style="overflow-x:auto;">
+    <table class="wsr-table">
+        <thead><tr>
+            <th>Task</th><th>Project</th><th>Person</th><th>Status now</th>
+            <th class="num">Time</th><th class="num">Share</th>
+        </tr></thead>
+        <tbody>
+        <?php foreach ($tv_tasks as $tid => $tk):
+            arsort($tk['people']);
+            $st = $rep['status'][$tid] ?? '';
+        ?>
+            <tr>
+                <td>
+                    <a href="task_detail.php?id=<?= (int)$tid ?>"><?= sanitize($rep['titles'][$tid] ?? ('Task #' . $tid)) ?></a>
+                    <?php if (isset($tv_auto[$tid])): ?>
+                    <i class="bi bi-exclamation-triangle-fill ms-1" style="color:#f59e0b;font-size:.72rem;" title="Includes a timer closed automatically — end time estimated"></i>
+                    <?php endif; ?>
+                </td>
+                <td class="wsr-muted"><?= sanitize($rep['proj_name'][$rep['task_proj'][$tid] ?? ''] ?? 'No project') ?></td>
+                <td>
+                    <?php foreach ($tk['people'] as $pid => $psecs): ?>
+                    <div style="white-space:nowrap;"<?= count($tk['people']) > 1 ? ' title="' . fmt_hm($psecs) . '"' : '' ?>>
+                        <a href="<?= $tv_link($pid) ?>" style="font-weight:500;"><?= sanitize($tv_names[$pid] ?? ('User #' . $pid)) ?></a>
+                        <?php if (count($tk['people']) > 1): ?><span class="wsr-muted"> · <?= fmt_hm($psecs) ?></span><?php endif; ?>
+                    </div>
+                    <?php endforeach; ?>
+                </td>
+                <td>
+                    <?php if ($st): ?>
+                    <span style="font-size:.7rem;font-weight:700;color:<?= $tv_status_color[$st] ?? '#64748b' ?>;"><?= sanitize(str_replace('_', ' ', $st)) ?></span>
+                    <?php endif; ?>
+                </td>
+                <td class="num"><strong><?= fmt_hm($tk['secs']) ?></strong></td>
+                <td class="num"><?= $tv_tot['covered'] > 0 ? round($tk['secs'] / $tv_tot['covered'] * 100) . '%' : '—' ?></td>
+            </tr>
+        <?php endforeach; ?>
+        </tbody>
+    </table>
+    </div>
+    <div class="wsr-muted" style="margin-top:9px;">
+        Adds up to the time on tasks. Status is the task's status today, not during the range.
+    </div>
+    <?php endif; ?>
+</div>
+
 <div class="wsr-card">
     <h6>By project</h6>
     <?php if (empty($rep['team_projects'])): ?>
