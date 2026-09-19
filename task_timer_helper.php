@@ -12,10 +12,15 @@ function start_task_timer($conn, $task_id, $user_id) {
     try {
         // Stop any existing active timer for this task
         stop_task_timer($conn, $task_id, $user_id);
-        
+
+        // The time belongs to whoever the task is assigned to, not whoever dragged the card.
+        // A lead moving a report's card used to bank the hours in the lead's own report and
+        // leave the assignee showing nothing.
+        $owner = task_timer_owner($conn, $task_id, $user_id);
+
         // Start new timer
         $conn->prepare("INSERT INTO task_timers (task_id, user_id, started_at) VALUES (?,?, CURRENT_TIMESTAMP)")
-             ->execute([$task_id, $user_id]);
+             ->execute([$task_id, $owner]);
         
         // Update task status
         $conn->prepare("UPDATE tasks SET timer_status='ACTIVE', timer_started_at=CURRENT_TIMESTAMP WHERE id=?")
@@ -34,30 +39,19 @@ function start_task_timer($conn, $task_id, $user_id) {
  */
 function stop_task_timer($conn, $task_id, $user_id) {
     try {
-        // Find the active timer (no end_at)
-        $stmt = $conn->prepare("SELECT id, started_at FROM task_timers WHERE task_id=? AND user_id=? AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1");
-        $stmt->execute([$task_id, $user_id]);
-        $timer = $stmt->fetch();
-        
-        if (!$timer) {
-            // No active timer to stop
-            return false;
-        }
-        
-        // Calculate duration using MySQL TIMESTAMPDIFF to avoid timezone issues
-        $stmt = $conn->prepare("SELECT TIMESTAMPDIFF(SECOND, ?, NOW()) as duration_in_seconds");
-        $stmt->execute([$timer['started_at']]);
-        $result = $stmt->fetch();
-        $duration = (int)$result['duration_in_seconds'];
-        
-        // Update timer with end time and duration
-        $conn->prepare("UPDATE task_timers SET ended_at=CURRENT_TIMESTAMP, duration_seconds=? WHERE id=?")
-             ->execute([$duration, $timer['id']]);
-        
+        // Close every open timer on the task, whoever owns it. Filtering by the caller left a
+        // timer running forever when one person started it and another moved the card on.
+        // TIMESTAMPDIFF in MySQL avoids PHP/MySQL timezone mismatches.
+        $stmt = $conn->prepare("UPDATE task_timers
+            SET ended_at = CURRENT_TIMESTAMP, duration_seconds = TIMESTAMPDIFF(SECOND, started_at, NOW())
+            WHERE task_id = ? AND ended_at IS NULL");
+        $stmt->execute([$task_id]);
+        if (!$stmt->rowCount()) return false;
+
         // Update task timer status
         $conn->prepare("UPDATE tasks SET timer_status='INACTIVE', timer_started_at=NULL WHERE id=?")
              ->execute([$task_id]);
-        
+
         return true;
     } catch (Exception $e) {
         error_log("Timer stop error: " . $e->getMessage());
@@ -66,11 +60,21 @@ function stop_task_timer($conn, $task_id, $user_id) {
 }
 
 /**
- * Get the active timer for a task (if any)
+ * Whose time a task's timer records: the assignee, or the caller when it is unassigned.
  */
-function get_active_task_timer($conn, $task_id, $user_id) {
-    $stmt = $conn->prepare("SELECT id, started_at, TIMESTAMPDIFF(SECOND, started_at, NOW()) as elapsed_seconds FROM task_timers WHERE task_id=? AND user_id=? AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1");
-    $stmt->execute([$task_id, $user_id]);
+function task_timer_owner($conn, $task_id, $fallback_user_id): int {
+    $stmt = $conn->prepare("SELECT assigned_to FROM tasks WHERE id=?");
+    $stmt->execute([$task_id]);
+    return (int)($stmt->fetchColumn() ?: $fallback_user_id);
+}
+
+/**
+ * Get the active timer for a task (if any), whoever it belongs to — a lead opening a
+ * report's task should still see that it is running. $user_id is kept for callers.
+ */
+function get_active_task_timer($conn, $task_id, $user_id = null) {
+    $stmt = $conn->prepare("SELECT id, started_at, TIMESTAMPDIFF(SECOND, started_at, NOW()) as elapsed_seconds FROM task_timers WHERE task_id=? AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1");
+    $stmt->execute([$task_id]);
     return $stmt->fetch();
 }
 
@@ -184,8 +188,12 @@ function resume_in_progress_timers($conn, $user_id) {
  * Intervals are split at midnight so an evening session never credits its hours to the
  * following day. Where TeamLogger activity is known for a day, each piece is then clipped
  * to those windows — a task left In Progress overnight stops earning the moment TeamLogger
- * says the person stopped, and idle and break time never counts. Days with no TeamLogger
- * data fall back to raw timer time and are marked unverified rather than silently dropped.
+ * says the person stopped, and idle and break time never counts.
+ *
+ * Days with no TeamLogger data count nothing. Timers stay open while a card sits in In
+ * Progress, so the raw figure for such a day is just "hours since midnight" for every open
+ * card — a weekend or an unsynced today put 16h on each of them. Those days are listed in
+ * `unverified` with the raw timer span as `raw`, so the report can say why they are empty.
  *
  * Two different totals come out of this, and they answer different questions:
  *   tracked = sum of every task's time. Two tasks left In Progress at once each count in
@@ -215,24 +223,21 @@ function summarize_task_time(array $rows, string $from, string $to, array $windo
             $seg_end  = min($e, $next_day);
 
             if (!isset($days[$d])) {
-                $days[$d] = ['tasks' => [], 'intervals' => [], 'verified' => isset($windows[$d])];
+                $days[$d] = ['tasks' => [], 'intervals' => [], 'raw' => [], 'verified' => isset($windows[$d])];
             }
 
-            // Clip to TeamLogger's working windows when we have them for this day.
-            $pieces = [];
+            // Only time inside TeamLogger's working windows counts.
             if (isset($windows[$d])) {
                 foreach ($windows[$d] as [$ws, $we]) {
                     $ps = max($cur, $ws);
                     $pe = min($seg_end, $we);
-                    if ($pe > $ps) $pieces[] = [$ps, $pe];
+                    if ($pe > $ps) {
+                        $days[$d]['tasks'][$tid][] = [$ps, $pe];
+                        $days[$d]['intervals'][]   = [$ps, $pe];
+                    }
                 }
             } else {
-                $pieces[] = [$cur, $seg_end];
-            }
-
-            foreach ($pieces as [$ps, $pe]) {
-                $days[$d]['tasks'][$tid] = ($days[$d]['tasks'][$tid] ?? 0) + ($pe - $ps);
-                $days[$d]['intervals'][] = [$ps, $pe];
+                $days[$d]['raw'][] = [$cur, $seg_end];
             }
 
             $cur = $seg_end;
@@ -253,8 +258,9 @@ function summarize_task_time(array $rows, string $from, string $to, array $windo
 
     foreach ($days as $d => $bucket) {
         $tracked = 0;
-        foreach ($bucket['tasks'] as $tid => $secs) {
-            $secs = min($secs, $cap);
+        foreach ($bucket['tasks'] as $tid => $ivs) {
+            // Union per task, so two timers open on the same card never count twice.
+            $secs = min(_union_seconds($ivs), $cap);
             $bucket['tasks'][$tid] = $secs;
             $tracked += $secs;
             $by_task[$tid] = ($by_task[$tid] ?? 0) + $secs;
@@ -291,9 +297,10 @@ function summarize_task_time(array $rows, string $from, string $to, array $windo
         }
         $slices = array_values(array_filter($clean, fn($x) => $x[1] - $x[0] >= 60));
 
+        $raw = $bucket['raw'] ? min(_union_seconds($bucket['raw']), $cap) : 0;
         $by_day[$d] = ['tracked' => $tracked, 'covered' => $covered, 'slices' => $slices,
-                       'tasks' => $bucket['tasks'], 'verified' => $bucket['verified']];
-        if (!$bucket['verified'] && $tracked > 0) $unverified[] = $d;
+                       'tasks' => $bucket['tasks'], 'verified' => $bucket['verified'], 'raw' => $raw];
+        if (!$bucket['verified'] && $raw > 0) $unverified[] = $d;
 
         $total_tracked += $tracked;
         $total_covered += $covered;
@@ -304,6 +311,20 @@ function summarize_task_time(array $rows, string $from, string $to, array $windo
     sort($unverified);
     return ['days' => $by_day, 'tasks' => $by_task, 'tracked' => $total_tracked,
             'covered' => $total_covered, 'unverified' => $unverified];
+}
+
+/** Seconds covered by a list of [start, end] intervals, overlaps counted once. */
+function _union_seconds(array $ivs): int {
+    usort($ivs, fn($a, $b) => $a[0] <=> $b[0]);
+    $total = 0; $cs = $ce = null;
+    foreach ($ivs as [$s, $e]) {
+        if ($cs === null) { [$cs, $ce] = [$s, $e]; continue; }
+        if ($s <= $ce)    { $ce = max($ce, $e); continue; }
+        $total += $ce - $cs;
+        [$cs, $ce] = [$s, $e];
+    }
+    if ($cs !== null) $total += $ce - $cs;
+    return $total;
 }
 
 /** Seconds as "6h 12m" (or "—" for nothing). */

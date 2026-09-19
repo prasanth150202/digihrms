@@ -921,10 +921,14 @@ if ($workspace_beta && ($tab === 'report' || isset($_GET['export']))) {
         FROM task_timers tt
         JOIN tasks t ON t.id = tt.task_id
         LEFT JOIN projects p ON p.id = t.project_id
-        WHERE tt.user_id = ?
+        WHERE COALESCE(t.assigned_to, tt.user_id) = ?
           AND tt.started_at < ? + INTERVAL 1 DAY
           AND COALESCE(tt.ended_at, NOW()) > ?
+          AND t.deleted_at IS NULL
         ORDER BY tt.started_at");
+    // Time is the assignee's. Timers used to be saved under whoever dragged the card, so a
+    // lead moving someone's work took the hours into their own report and left the assignee
+    // at zero; matching on the assignee reads those older rows correctly too.
     $rq->execute([$rep_uid, $rep_to, $rep_from]);
     $rep_rows = $rq->fetchAll();
 
@@ -1028,7 +1032,7 @@ if ($workspace_beta && ($tab === 'report' || isset($_GET['export']))) {
         foreach ($rep_days as $d) {
             $day = $rep_sum['days'][$d] ?? null;
             if (!$day || !$day['tasks']) {
-                fputcsv($out, [$who, $d, '', '(nothing tracked)', '0.00', '0.00',
+                fputcsv($out, [$who, $d, '', !empty($day['raw']) && empty($day['verified']) ? '(TeamLogger not synced)' : '(nothing tracked)', '0.00', '0.00',
                     number_format((float)($rep_worked[$d] ?? 0), 2, '.', ''),
                     number_format((float)($rep_att[$d]['ah'] ?? 0), 2, '.', ''),
                     number_format((float)($rep_att[$d]['ih'] ?? 0), 2, '.', ''),
@@ -2305,9 +2309,10 @@ function wsbResetCols(form) {
 <?php if (!empty($rep['sum']['unverified'])): ?>
 <div class="wsr-warn">
     <i class="bi bi-question-circle me-1"></i>
-    <strong><?= count($rep['sum']['unverified']) ?> day(s) have no TeamLogger activity to check against</strong>
+    <strong><?= count($rep['sum']['unverified']) ?> day(s) have no TeamLogger activity yet</strong>
     — <?= sanitize(implode(', ', array_map(fn($d) => date('D d M', strtotime($d)), array_slice($rep['sum']['unverified'], 0, 6)))) ?>.
-    Task time for those days is the raw timer and is marked <em>unverified</em> below.
+    A card stays timed while it sits in In&nbsp;Progress, so without TeamLogger there is no telling
+    work from a card left open overnight. Those days count nothing until TeamLogger is synced for them.
 </div>
 <?php endif; ?>
 
@@ -2407,7 +2412,7 @@ function wsbResetCols(form) {
         <strong>On tasks</strong> counts the time a task was open <em>and</em> TeamLogger was recording —
         idle time at your desk included. Breaks and time with TeamLogger off are excluded, so a card left
         in In&nbsp;Progress stops earning once you stop.
-        <span style="color:#f59e0b;">*</span> marks a day with no TeamLogger data to check against.
+        <span style="color:#f59e0b;">*</span> marks a day with no TeamLogger data, which counts nothing until it is synced.
         Hover a figure to see the exact periods counted.
     </div>
     <table class="wsr-table">
@@ -2436,9 +2441,10 @@ function wsbResetCols(form) {
                 }
                 ?>
                 <td class="num"<?= $slice_txt ? ' title="' . sanitize($slice_txt) . '"' : '' ?>>
+                    <?php if (!empty($day['raw']) && empty($day['verified'])): ?>
+                    <span class="wsr-muted" title="No TeamLogger activity for this day. A card was open for <?= fmt_hm($day['raw']) ?>, which is not counted.">not synced <span style="color:#f59e0b;">*</span></span>
+                    <?php else: ?>
                     <?= fmt_hm($cov) ?>
-                    <?php if ($cov > 0 && empty($day['verified'])): ?>
-                    <span title="No TeamLogger activity for this day — raw timer value" style="color:#f59e0b;">*</span>
                     <?php endif; ?>
                 </td>
                 <td class="num"><?= $pc === null ? '—' : $pc . '%' ?></td>
