@@ -195,11 +195,14 @@ function resume_in_progress_timers($conn, $user_id) {
  * card — a weekend or an unsynced today put 16h on each of them. Those days are listed in
  * `unverified` with the raw timer span as `raw`, so the report can say why they are empty.
  *
- * Two different totals come out of this, and they answer different questions:
- *   tracked = sum of every task's time. Two tasks left In Progress at once each count in
- *             full, by design, so this can exceed the hours in a day.
+ * Time when several cards were in In Progress together is split evenly between them —
+ * there is no telling which one was being worked, and counting each in full let seven
+ * parked cards turn 16 working hours into 117. So per-task figures add up to real time:
+ *   tracked = sum of every task's share. Equals covered, give or take rounding.
  *   covered = the union of the intervals, i.e. wall-clock time with at least one task
  *             running. This is the one to compare against TeamLogger's active hours.
+ *   max_open = most cards open at the same moment, so the report can say when the split
+ *              was spread thin.
  *
  * @param array $rows    each ['task_id','started_at','ended_at']
  * @param array $windows date => list of [start_ts, end_ts] counted as working time
@@ -255,16 +258,18 @@ function summarize_task_time(array $rows, string $from, string $to, array $windo
     $total_tracked = 0;
     $total_covered = 0;
     $unverified = [];
+    $peak_open = 0;
 
     foreach ($days as $d => $bucket) {
+        [$shares, $max_open] = _split_shares($bucket['tasks']);
         $tracked = 0;
-        foreach ($bucket['tasks'] as $tid => $ivs) {
-            // Union per task, so two timers open on the same card never count twice.
-            $secs = min(_union_seconds($ivs), $cap);
+        foreach ($shares as $tid => $secs) {
+            $secs = min($secs, $cap);
             $bucket['tasks'][$tid] = $secs;
             $tracked += $secs;
             $by_task[$tid] = ($by_task[$tid] ?? 0) + $secs;
         }
+        $peak_open = max($peak_open, $max_open);
 
         // Union of intervals — overlapping work counts once against wall-clock time. The
         // merged pieces are kept so the report can show exactly which minutes it counted,
@@ -299,7 +304,8 @@ function summarize_task_time(array $rows, string $from, string $to, array $windo
 
         $raw = $bucket['raw'] ? min(_union_seconds($bucket['raw']), $cap) : 0;
         $by_day[$d] = ['tracked' => $tracked, 'covered' => $covered, 'slices' => $slices,
-                       'tasks' => $bucket['tasks'], 'verified' => $bucket['verified'], 'raw' => $raw];
+                       'tasks' => $bucket['tasks'], 'verified' => $bucket['verified'], 'raw' => $raw,
+                       'max_open' => $max_open];
         if (!$bucket['verified'] && $raw > 0) $unverified[] = $d;
 
         $total_tracked += $tracked;
@@ -310,7 +316,7 @@ function summarize_task_time(array $rows, string $from, string $to, array $windo
     arsort($by_task);
     sort($unverified);
     return ['days' => $by_day, 'tasks' => $by_task, 'tracked' => $total_tracked,
-            'covered' => $total_covered, 'unverified' => $unverified];
+            'covered' => $total_covered, 'unverified' => $unverified, 'max_open' => $peak_open];
 }
 
 /** Seconds covered by a list of [start, end] intervals, overlaps counted once. */
@@ -325,6 +331,46 @@ function _union_seconds(array $ivs): int {
     }
     if ($cs !== null) $total += $ce - $cs;
     return $total;
+}
+
+/**
+ * Share out time between tasks open at the same moment: each stretch is divided evenly
+ * among the cards running during it. Returns [task_id => seconds, most open at once].
+ *
+ * @param array $by_task task_id => list of [start, end]
+ */
+function _split_shares(array $by_task): array {
+    $events = [];
+    foreach ($by_task as $tid => $ivs) {
+        // Merge each task's own pieces first, so a duplicate timer is not a second card.
+        usort($ivs, fn($a, $b) => $a[0] <=> $b[0]);
+        $merged = [];
+        foreach ($ivs as [$s, $e]) {
+            if ($merged && $s <= $merged[count($merged) - 1][1]) {
+                $merged[count($merged) - 1][1] = max($merged[count($merged) - 1][1], $e);
+            } else {
+                $merged[] = [$s, $e];
+            }
+        }
+        foreach ($merged as [$s, $e]) { $events[] = [$s, 1, $tid]; $events[] = [$e, -1, $tid]; }
+    }
+    // Ends sort before starts at the same instant, so back-to-back cards never overlap.
+    usort($events, fn($a, $b) => [$a[0], $a[1]] <=> [$b[0], $b[1]]);
+
+    $shares = [];
+    $open = [];
+    $max_open = 0;
+    $prev = null;
+    foreach ($events as [$t, $kind, $tid]) {
+        if ($prev !== null && $t > $prev && $open) {
+            $each = ($t - $prev) / count($open);
+            foreach ($open as $o => $_) $shares[$o] = ($shares[$o] ?? 0) + $each;
+        }
+        if ($kind === 1) $open[$tid] = true; else unset($open[$tid]);
+        $max_open = max($max_open, count($open));
+        $prev = $t;
+    }
+    return [array_map(fn($x) => (int)round($x), $shares), $max_open];
 }
 
 /** Seconds as "6h 12m" (or "—" for nothing). */

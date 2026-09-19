@@ -2335,9 +2335,9 @@ function wsbResetCols(form) {
         <div class="s">Clipped to TeamLogger's recording — breaks excluded, idle counted</div>
     </div>
     <div class="wsr-tile">
-        <div class="v"><?= fmt_hm($r_trk) ?></div>
-        <div class="l">Sum per task</div>
-        <div class="s"><?= $r_trk > $r_cov ? 'Higher — overlapping tasks each counted in full' : 'No overlapping tasks' ?></div>
+        <div class="v"><?= (int)($rep['sum']['max_open'] ?? 0) ?: '—' ?></div>
+        <div class="l">Cards open at once</div>
+        <div class="s"><?= ($rep['sum']['max_open'] ?? 0) > 1 ? 'At most — shared time is split evenly between them' : 'One task at a time' ?></div>
     </div>
     <div class="wsr-tile">
         <div class="v"><?= $rep['att_ok'] && $r_act > 0 ? fmt_hm((int)$r_act) : '—' ?></div>
@@ -2375,7 +2375,8 @@ function wsbResetCols(form) {
         </tbody>
     </table>
     <div class="wsr-muted" style="margin-top:9px;">
-        Totals here regroup the same task time, so they add up to <strong><?= fmt_hm($r_trk) ?></strong> — the sum-per-task figure, not wall-clock time.
+        These add up to the time on tasks. When several cards were in In&nbsp;Progress together,
+        their shared time is split evenly between them — the board cannot tell which one was being worked.
     </div>
     <?php endif; ?>
 </div>
