@@ -889,6 +889,120 @@ try {
     }
 } catch (PDOException $e) {}
 
+// ── REPORT DATA LOADER ───────────────────────────────────
+// Task time and TeamLogger activity for a set of people over a date range, in three queries
+// whatever the headcount. Keyed by user id; the single-person and team views both read it.
+function rep_load($conn, array $uids, string $from, string $to): array {
+    $uids = array_values(array_unique(array_map('intval', $uids)));
+    $in   = implode(',', $uids) ?: '0'; // already cast to int
+
+    $days = [];
+    for ($d = strtotime($from); $d <= strtotime($to); $d = strtotime('+1 day', $d)) {
+        $days[] = date('Y-m-d', $d);
+    }
+
+    // Time is the assignee's. Timers used to be saved under whoever dragged the card, so a
+    // lead moving someone's work took the hours into their own report and left the assignee
+    // at zero; matching on the assignee reads those older rows correctly too.
+    $rq = $conn->prepare("SELECT COALESCE(t.assigned_to, tt.user_id) AS owner,
+            tt.task_id, tt.started_at, tt.auto_closed,
+            COALESCE(tt.ended_at, NOW()) AS ended_at, t.title, t.project_id, p.name AS project_name
+        FROM task_timers tt
+        JOIN tasks t ON t.id = tt.task_id
+        LEFT JOIN projects p ON p.id = t.project_id
+        WHERE COALESCE(t.assigned_to, tt.user_id) IN ($in)
+          AND tt.started_at < ? + INTERVAL 1 DAY
+          AND COALESCE(tt.ended_at, NOW()) > ?
+          AND t.deleted_at IS NULL
+        ORDER BY tt.started_at");
+    $rq->execute([$to, $from]);
+    $rows = [];
+    $titles = []; $task_proj = []; $proj_name = ['' => 'No project'];
+    foreach ($rq->fetchAll() as $r) {
+        $rows[(int)$r['owner']][] = $r;
+        $tid = (int)$r['task_id'];
+        $titles[$tid] = $r['title'];
+        $pk = !empty($r['project_id']) ? (string)(int)$r['project_id'] : '';
+        $task_proj[$tid] = $pk;
+        if ($pk !== '') $proj_name[$pk] = $r['project_name'] ?: ('Project #' . $pk);
+    }
+
+    // TeamLogger's working windows. Task time gets clipped to these, so a card left In
+    // Progress overnight stops earning when they actually stopped. Idle counts — sitting at
+    // the desk thinking is still working the task. Breaks and time when TeamLogger was not
+    // recording at all do not.
+    $windows = [];
+    try {
+        $sq = $conn->prepare("SELECT user_id, date, start_at, end_at FROM tl_segments
+            WHERE user_id IN ($in) AND date>=? AND date<=? AND type IN ('active','meeting','idle')
+            ORDER BY start_at");
+        $sq->execute([$from, $to]);
+        foreach ($sq->fetchAll() as $sg) {
+            $windows[(int)$sg['user_id']][$sg['date']][] = [strtotime($sg['start_at']), strtotime($sg['end_at'])];
+        }
+    } catch (Exception $e) { $windows = []; }
+
+    // TeamLogger activity is already synced into `attendance` as one row per person per
+    // day, so the comparison costs a join rather than an API call. MAX() because a day can
+    // carry rows from more than one source.
+    $att = [];
+    $att_ok = true;
+    try {
+        $aq = $conn->prepare("SELECT user_id, date,
+                MAX(active_hours) ah, MAX(idle_hours) ih, MAX(break_hours) bh,
+                MAX(meeting_hours) mh, MAX(total_hours) th
+            FROM attendance WHERE user_id IN ($in) AND date >= ? AND date <= ? GROUP BY user_id, date");
+        $aq->execute([$from, $to]);
+        foreach ($aq->fetchAll() as $a) $att[(int)$a['user_id']][$a['date']] = $a;
+    } catch (Exception $e) { $att_ok = false; }
+
+    $people = [];
+    foreach ($uids as $pid) {
+        $p_rows = $rows[$pid] ?? [];
+        $p_att  = $att[$pid] ?? [];
+        $p_win  = $windows[$pid] ?? [];
+        $sum    = summarize_task_time($p_rows, $from, $to, $p_win);
+
+        $auto = [];
+        foreach ($p_rows as $r) if (!empty($r['auto_closed'])) $auto[(int)$r['task_id']] = true;
+
+        // Project totals are the task totals regrouped, so the two tables reconcile.
+        $projects = [];
+        foreach ($sum['tasks'] as $tid => $secs) {
+            $pk = $task_proj[$tid] ?? '';
+            if (!isset($projects[$pk])) $projects[$pk] = ['secs' => 0, 'tasks' => 0];
+            $projects[$pk]['secs']  += $secs;
+            $projects[$pk]['tasks'] += 1;
+        }
+        uasort($projects, fn($a, $b) => $b['secs'] <=> $a['secs']);
+
+        // Total worked is TeamLogger's own figure from the punch report. That field is absent
+        // from some API responses, in which case the sync stores NULL while still recording
+        // the segment breakdown — so rebuild it from the parts rather than show a blank day.
+        $active_total = 0.0; $idle_total = 0.0; $worked_total = 0.0; $worked = [];
+        foreach ($days as $d) {
+            $active_total += (float)($p_att[$d]['ah'] ?? 0);
+            $idle_total   += (float)($p_att[$d]['ih'] ?? 0);
+            $w = (float)($p_att[$d]['th'] ?? 0);
+            if ($w <= 0) {
+                $w = (float)($p_att[$d]['ah'] ?? 0) + (float)($p_att[$d]['ih'] ?? 0)
+                   + (float)($p_att[$d]['bh'] ?? 0) + (float)($p_att[$d]['mh'] ?? 0);
+            }
+            $worked[$d]    = $w;
+            $worked_total += $w;
+        }
+
+        $people[$pid] = [
+            'sum' => $sum, 'auto' => $auto, 'projects' => $projects, 'att' => $p_att,
+            'windows' => $p_win, 'worked' => $worked, 'worked_total' => $worked_total,
+            'active_total' => $active_total, 'idle_total' => $idle_total,
+        ];
+    }
+
+    return ['days' => $days, 'people' => $people, 'titles' => $titles, 'task_proj' => $task_proj,
+            'proj_name' => $proj_name, 'att_ok' => $att_ok];
+}
+
 // ── REPORT TAB DATA (beta Workspace) ─────────────────────
 $rep = null;
 if ($workspace_beta && ($tab === 'report' || isset($_GET['export']))) {
@@ -920,142 +1034,89 @@ if ($workspace_beta && ($tab === 'report' || isset($_GET['export']))) {
         $rep_from = date('Y-m-d', strtotime($rep_to . ' -186 days'));
     }
 
-    $rq = $conn->prepare("SELECT tt.task_id, tt.started_at, tt.auto_closed,
-            COALESCE(tt.ended_at, NOW()) AS ended_at, t.title, t.project_id, p.name AS project_name
-        FROM task_timers tt
-        JOIN tasks t ON t.id = tt.task_id
-        LEFT JOIN projects p ON p.id = t.project_id
-        WHERE COALESCE(t.assigned_to, tt.user_id) = ?
-          AND tt.started_at < ? + INTERVAL 1 DAY
-          AND COALESCE(tt.ended_at, NOW()) > ?
-          AND t.deleted_at IS NULL
-        ORDER BY tt.started_at");
-    // Time is the assignee's. Timers used to be saved under whoever dragged the card, so a
-    // lead moving someone's work took the hours into their own report and left the assignee
-    // at zero; matching on the assignee reads those older rows correctly too.
-    $rq->execute([$rep_uid, $rep_to, $rep_from]);
-    $rep_rows = $rq->fetchAll();
+    // People picker: any subset of the allowed list, as people[]=id. One person is their own
+    // report; two or more is the team view for just those people. user=team means everyone.
+    $rep_allowed = array_column($rep_people, 'id');
+    $rep_pick = array_values(array_unique(array_intersect(
+        array_map('intval', (array)($_GET['people'] ?? [])), $rep_allowed)));
+    if (!$rep_pick && ($_GET['user'] ?? '') === 'team') $rep_pick = $rep_allowed;
+    if (count($rep_pick) === 1) { $rep_uid = $rep_pick[0]; $rep_denied = false; }
+    $rep_team = count($rep_pick) > 1;
+    if ($rep_team) $rep_denied = false;
 
-    // TeamLogger's working windows for this person. Task time gets clipped to these, so a
-    // card left In Progress overnight stops earning when they actually stopped. Idle counts
-    // — sitting at the desk thinking is still working the task. Breaks and time when
-    // TeamLogger was not recording at all do not.
-    $rep_windows = [];
-    try {
-        $sq = $conn->prepare("SELECT date, start_at, end_at FROM tl_segments
-            WHERE user_id=? AND date>=? AND date<=? AND type IN ('active','meeting','idle')
-            ORDER BY start_at");
-        $sq->execute([$rep_uid, $rep_from, $rep_to]);
-        foreach ($sq->fetchAll() as $sg) {
-            $rep_windows[$sg['date']][] = [strtotime($sg['start_at']), strtotime($sg['end_at'])];
-        }
-    } catch (Exception $e) { $rep_windows = []; }
-
-    $rep_sum    = summarize_task_time($rep_rows, $rep_from, $rep_to, $rep_windows);
-    $rep_titles = [];
-    $rep_auto   = [];
-    $rep_task_proj = []; // task_id => project key ('' when the task has no project)
-    $rep_proj_name = ['' => 'No project'];
-    foreach ($rep_rows as $r) {
-        $tid = (int)$r['task_id'];
-        $rep_titles[$tid] = $r['title'];
-        if (!empty($r['auto_closed'])) $rep_auto[$tid] = true;
-        $pk = !empty($r['project_id']) ? (string)(int)$r['project_id'] : '';
-        $rep_task_proj[$tid] = $pk;
-        if ($pk !== '') $rep_proj_name[$pk] = $r['project_name'] ?: ('Project #' . $pk);
-    }
-
-    // Project totals are the task totals regrouped, so the two tables reconcile exactly
-    // against the "Sum per task" tile. Both carry the same overlap caveat.
-    $rep_projects = [];
-    foreach ($rep_sum['tasks'] as $tid => $secs) {
-        $pk = $rep_task_proj[$tid] ?? '';
-        if (!isset($rep_projects[$pk])) $rep_projects[$pk] = ['secs' => 0, 'tasks' => 0];
-        $rep_projects[$pk]['secs']  += $secs;
-        $rep_projects[$pk]['tasks'] += 1;
-    }
-    uasort($rep_projects, fn($a, $b) => $b['secs'] <=> $a['secs']);
-
-    // TeamLogger activity is already synced into `attendance` as one row per person per
-    // day, so the comparison costs a join rather than an API call. MAX() because a day can
-    // carry rows from more than one source.
-    $rep_att = [];
-    $rep_att_ok = true;
-    try {
-        $aq = $conn->prepare("SELECT date,
-                MAX(active_hours) ah, MAX(idle_hours) ih, MAX(break_hours) bh,
-                MAX(meeting_hours) mh, MAX(total_hours) th
-            FROM attendance WHERE user_id = ? AND date >= ? AND date <= ? GROUP BY date");
-        $aq->execute([$rep_uid, $rep_from, $rep_to]);
-        foreach ($aq->fetchAll() as $a) $rep_att[$a['date']] = $a;
-    } catch (Exception $e) { $rep_att_ok = false; }
-
-    $rep_days = [];
-    for ($d = strtotime($rep_from); $d <= strtotime($rep_to); $d = strtotime('+1 day', $d)) {
-        $rep_days[] = date('Y-m-d', $d);
-    }
-
-    // Total worked is TeamLogger's own figure from the punch report. That field is absent
-    // from some API responses, in which case the sync stores NULL while still recording the
-    // segment breakdown — so rebuild it from the parts rather than showing a blank day.
-    $rep_active_total = 0.0;
-    $rep_worked_total = 0.0;
-    $rep_worked = [];
-    foreach ($rep_days as $d) {
-        $rep_active_total += (float)($rep_att[$d]['ah'] ?? 0);
-
-        $w = (float)($rep_att[$d]['th'] ?? 0);
-        if ($w <= 0) {
-            $w = (float)($rep_att[$d]['ah'] ?? 0) + (float)($rep_att[$d]['ih'] ?? 0)
-               + (float)($rep_att[$d]['bh'] ?? 0) + (float)($rep_att[$d]['mh'] ?? 0);
-        }
-        $rep_worked[$d]    = $w;
-        $rep_worked_total += $w;
-    }
+    $rep_ids  = $rep_team ? $rep_pick : [$rep_uid];
+    // Carries the current selection into the CSV, date-range and sync links.
+    $rep_qs = implode('&amp;', array_map(fn($id) => 'people[]=' . (int)$id, $rep_ids));
+    $rep_load = rep_load($conn, $rep_ids, $rep_from, $rep_to);
+    $rep_days = $rep_load['days'];
+    $rep_titles = $rep_load['titles'];
+    $rep_proj_name = $rep_load['proj_name'];
+    $rep_task_proj = $rep_load['task_proj'];
+    $rep_att_ok = $rep_load['att_ok'];
+    $P = $rep_load['people'][$rep_uid] ?? $rep_load['people'][$rep_ids[0]];
 
     $rep = [
-        'uid' => $rep_uid, 'from' => $rep_from, 'to' => $rep_to,
-        'people' => $rep_people, 'days' => $rep_days, 'sum' => $rep_sum, 'denied' => $rep_denied,
-        'titles' => $rep_titles, 'auto' => $rep_auto,
-        'projects' => $rep_projects, 'proj_name' => $rep_proj_name, 'task_proj' => $rep_task_proj,
-        'att' => $rep_att, 'att_ok' => $rep_att_ok, 'active_total' => $rep_active_total,
-        'windows' => $rep_windows,
-        'worked_total' => $rep_worked_total, 'worked' => $rep_worked,
+        'uid' => $rep_uid, 'from' => $rep_from, 'to' => $rep_to, 'team' => $rep_team,
+        'picked' => $rep_ids, 'qs' => $rep_qs,
+        'people' => $rep_people, 'days' => $rep_days, 'sum' => $P['sum'], 'denied' => $rep_denied,
+        'titles' => $rep_titles, 'auto' => $P['auto'],
+        'projects' => $P['projects'], 'proj_name' => $rep_proj_name, 'task_proj' => $rep_task_proj,
+        'att' => $P['att'], 'att_ok' => $rep_att_ok, 'active_total' => $P['active_total'],
+        'windows' => $P['windows'],
+        'worked_total' => $P['worked_total'], 'worked' => $P['worked'],
+        'members' => $rep_load['people'],
     ];
+
+    // Team view: the same figures per person, plus project time pooled across everyone.
+    // Task time is split between a person's open cards, so these sums are real hours.
+    if ($rep_team) {
+        $tp = [];
+        foreach ($rep_load['people'] as $pid => $pd) {
+            foreach ($pd['projects'] as $pk => $pr) {
+                if (!isset($tp[$pk])) $tp[$pk] = ['secs' => 0, 'tasks' => 0, 'people' => []];
+                $tp[$pk]['secs']  += $pr['secs'];
+                $tp[$pk]['tasks'] += $pr['tasks'];
+                $tp[$pk]['people'][$pid] = true;
+            }
+        }
+        uasort($tp, fn($a, $b) => $b['secs'] <=> $a['secs']);
+        $rep['team_projects'] = $tp;
+    }
 
     // CSV export — must finish before header.php emits any markup.
     if (isset($_GET['export'])) {
-        $who = 'me';
-        foreach ($rep_people as $pp) if ($pp['id'] === $rep_uid) $who = $pp['name'];
+        $names = array_column($rep_people, 'name', 'id');
+        $fname = $rep_team ? 'team_time_' : 'task_time_';
         header('Content-Type: text/csv; charset=utf-8');
-        header('Content-Disposition: attachment; filename="task_time_' . $rep_from . '_to_' . $rep_to . '.csv"');
+        header('Content-Disposition: attachment; filename="' . $fname . $rep_from . '_to_' . $rep_to . '.csv"');
         $out = fopen('php://output', 'w');
         fputcsv($out, ['Person', 'Date', 'Project', 'Task', 'Tracked hours', 'Day covered hours',
                        'TeamLogger worked', 'TeamLogger active', 'TeamLogger idle',
                        'TeamLogger meeting', 'Auto-closed']);
-        foreach ($rep_days as $d) {
-            $day = $rep_sum['days'][$d] ?? null;
-            if (!$day || !$day['tasks']) {
-                fputcsv($out, [$who, $d, '', !empty($day['raw']) && empty($day['verified']) ? '(TeamLogger not synced)' : '(nothing tracked)', '0.00', '0.00',
-                    number_format((float)($rep_worked[$d] ?? 0), 2, '.', ''),
-                    number_format((float)($rep_att[$d]['ah'] ?? 0), 2, '.', ''),
-                    number_format((float)($rep_att[$d]['ih'] ?? 0), 2, '.', ''),
-                    number_format((float)($rep_att[$d]['mh'] ?? 0), 2, '.', ''), '']);
-                continue;
-            }
-            foreach ($day['tasks'] as $tid => $secs) {
-                fputcsv($out, [
-                    $who, $d,
-                    $rep_proj_name[$rep_task_proj[$tid] ?? ''] ?? 'No project',
-                    $rep_titles[$tid] ?? ('Task #' . $tid),
-                    number_format($secs / 3600, 2, '.', ''),
-                    number_format($day['covered'] / 3600, 2, '.', ''),
-                    number_format((float)($rep_worked[$d] ?? 0), 2, '.', ''),
-                    number_format((float)($rep_att[$d]['ah'] ?? 0), 2, '.', ''),
-                    number_format((float)($rep_att[$d]['ih'] ?? 0), 2, '.', ''),
-                    number_format((float)($rep_att[$d]['mh'] ?? 0), 2, '.', ''),
-                    isset($rep_auto[$tid]) ? 'yes' : '',
-                ]);
+        foreach ($rep_load['people'] as $pid => $pd) {
+            $who = $names[$pid] ?? ('User #' . $pid);
+            foreach ($rep_days as $d) {
+                $day = $pd['sum']['days'][$d] ?? null;
+                $tl  = [
+                    number_format((float)($pd['worked'][$d] ?? 0), 2, '.', ''),
+                    number_format((float)($pd['att'][$d]['ah'] ?? 0), 2, '.', ''),
+                    number_format((float)($pd['att'][$d]['ih'] ?? 0), 2, '.', ''),
+                    number_format((float)($pd['att'][$d]['mh'] ?? 0), 2, '.', ''),
+                ];
+                if (!$day || !$day['tasks']) {
+                    $label = !empty($day['raw']) && empty($day['verified']) ? '(TeamLogger not synced)' : '(nothing tracked)';
+                    fputcsv($out, array_merge([$who, $d, '', $label, '0.00', '0.00'], $tl, ['']));
+                    continue;
+                }
+                foreach ($day['tasks'] as $tid => $secs) {
+                    fputcsv($out, array_merge([
+                        $who, $d,
+                        $rep_proj_name[$rep_task_proj[$tid] ?? ''] ?? 'No project',
+                        $rep_titles[$tid] ?? ('Task #' . $tid),
+                        number_format($secs / 3600, 2, '.', ''),
+                        number_format($day['covered'] / 3600, 2, '.', ''),
+                    ], $tl, [isset($pd['auto'][$tid]) ? 'yes' : '']));
+                }
             }
         }
         fclose($out);
@@ -2255,18 +2316,34 @@ function wsbResetCols(form) {
 
 <form method="GET" class="wsr-bar">
     <input type="hidden" name="tab" value="report">
-    <?php if (count($rep['people']) > 1): ?>
-    <div>
-        <label>Person</label>
-        <select name="user" class="form-select form-select-sm" style="min-width:180px;"
-                onchange="this.form.submit()">
+    <?php if (count($rep['people']) > 1):
+        $pk_n = count($rep['picked']);
+        $pk_label = $pk_n === count($rep['people']) ? 'Whole team (' . $pk_n . ')'
+            : ($pk_n === 1 ? (array_column($rep['people'], 'name', 'id')[$rep['picked'][0]] ?? '1 person')
+            : $pk_n . ' people');
+    ?>
+    <div class="dropdown">
+        <label>People</label>
+        <button type="button" class="form-select form-select-sm text-start" style="min-width:200px;"
+                data-bs-toggle="dropdown" data-bs-auto-close="outside"><?= sanitize($pk_label) ?></button>
+        <div class="dropdown-menu p-2" style="min-width:240px;max-height:360px;overflow-y:auto;">
+            <div class="d-flex gap-2 mb-2 px-1">
+                <a href="#" class="small" onclick="wsrPick(true);return false;">All</a>
+                <a href="#" class="small" onclick="wsrPick(false);return false;">None</a>
+            </div>
             <?php foreach ($rep['people'] as $pp): ?>
-            <option value="<?= (int)$pp['id'] ?>" <?= $pp['id'] === $rep['uid'] ? 'selected' : '' ?>>
+            <label class="dropdown-item d-flex align-items-center gap-2 rounded" style="cursor:pointer;text-transform:none;letter-spacing:0;font-size:.85rem;font-weight:500;color:var(--text-primary);margin:0;">
+                <input type="checkbox" class="form-check-input m-0 wsr-pick" name="people[]" value="<?= (int)$pp['id'] ?>"
+                       <?= in_array($pp['id'], $rep['picked'], true) ? 'checked' : '' ?>>
                 <?= sanitize($pp['name']) ?>
-            </option>
+            </label>
             <?php endforeach; ?>
-        </select>
+            <button class="btn btn-sm btn-primary w-100 mt-2" style="border-radius:8px;">Show</button>
+        </div>
     </div>
+    <script>
+    function wsrPick(on) { document.querySelectorAll('.wsr-pick').forEach(function (c) { c.checked = on; }); }
+    </script>
     <?php endif; ?>
     <div>
         <label>From</label>
@@ -2278,7 +2355,7 @@ function wsbResetCols(form) {
     </div>
     <button class="btn btn-sm btn-primary" style="border-radius:8px;">Apply</button>
     <a class="btn btn-sm btn-outline-secondary" style="border-radius:8px;"
-       href="?tab=report&amp;user=<?= (int)$rep['uid'] ?>&amp;from=<?= urlencode($rep['from']) ?>&amp;to=<?= urlencode($rep['to']) ?>&amp;export=1">
+       href="?tab=report&amp;<?= $rep['qs'] ?>&amp;from=<?= urlencode($rep['from']) ?>&amp;to=<?= urlencode($rep['to']) ?>&amp;export=1">
         <i class="bi bi-download me-1"></i>CSV
     </a>
     <?php if ($r_can_sync): ?>
@@ -2290,10 +2367,12 @@ function wsbResetCols(form) {
     <div class="ms-auto d-flex gap-1 align-items-end">
         <?php foreach (['7 days' => 6, '30 days' => 29] as $lbl => $back): ?>
         <a class="btn btn-sm btn-light" style="border-radius:8px;"
-           href="?tab=report&amp;user=<?= (int)$rep['uid'] ?>&amp;from=<?= date('Y-m-d', strtotime("-$back days")) ?>&amp;to=<?= date('Y-m-d') ?>">Last <?= $lbl ?></a>
+           href="?tab=report&amp;<?= $rep['qs'] ?>&amp;from=<?= date('Y-m-d', strtotime("-$back days")) ?>&amp;to=<?= date('Y-m-d') ?>">Last <?= $lbl ?></a>
         <?php endforeach; ?>
     </div>
 </form>
+
+<?php if ($rep['team']): include __DIR__ . '/report_team_view.php'; else: ?>
 
 <?php if ($rep['denied']): ?>
 <div class="wsr-warn"><i class="bi bi-shield-exclamation me-1"></i>
@@ -2459,6 +2538,8 @@ function wsbResetCols(form) {
         </tbody>
     </table>
 </div>
+
+<?php endif; /* person view */ ?>
 
 </div>
 
