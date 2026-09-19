@@ -2360,6 +2360,18 @@ function wsbResetCols(form) {
        href="?tab=report&amp;<?= $rep['qs'] ?>&amp;from=<?= urlencode($rep['from']) ?>&amp;to=<?= urlencode($rep['to']) ?>&amp;export=1">
         <i class="bi bi-download me-1"></i>CSV
     </a>
+    <?php
+    $wsr_names = array_column($rep['people'], 'name', 'id');
+    $wsr_who = $rep['team']
+        ? (count($rep['picked']) === count($rep['people']) ? 'Whole team' : implode(', ', array_map(fn($id) => $wsr_names[$id] ?? '', $rep['picked'])))
+        : preg_replace('/ \(me\)$/', '', $wsr_names[$rep['uid']] ?? '');
+    ?>
+    <button type="button" class="btn btn-sm btn-outline-secondary" style="border-radius:8px;"
+            onclick="wsrPdf(this)" data-who="<?= sanitize($wsr_who) ?>"
+            data-range="<?= date('d M Y', strtotime($rep['from'])) ?> – <?= date('d M Y', strtotime($rep['to'])) ?>"
+            data-file="Task report <?= sanitize($rep['team'] ? 'team' : $wsr_who) ?> <?= sanitize($rep['from']) ?> to <?= sanitize($rep['to']) ?>">
+        <i class="bi bi-filetype-pdf me-1"></i>PDF
+    </button>
     <?php if ($r_can_sync): ?>
     <button type="button" id="wsrSync" class="btn btn-sm btn-outline-primary" style="border-radius:8px;">
         <i class="bi bi-arrow-repeat me-1"></i>Sync TeamLogger
@@ -2639,6 +2651,54 @@ function wsbResetCols(form) {
 <?php endif; ?>
 
 <script>
+// PDF export. Copies just the report — not the sidebar, tabs or filter bar — into a clean
+// window with the page's own styles and opens the print dialog, where "Save as PDF" makes
+// the file. Charts are canvases, which do not survive cloning, so they go across as images.
+function wsrPdf(btn) {
+    var src = document.querySelector('.wsr');
+    if (!src) return;
+    var copy = src.cloneNode(true);
+    var bar = copy.querySelector('.wsr-bar');
+    if (bar) bar.remove();
+    copy.querySelectorAll('script').forEach(function (n) { n.remove(); });
+    var srcCanvases = src.querySelectorAll('canvas');
+    copy.querySelectorAll('canvas').forEach(function (c, i) {
+        var img = document.createElement('img');
+        try { img.src = srcCanvases[i].toDataURL('image/png'); } catch (e) { c.remove(); return; }
+        img.style.width = '100%';
+        c.replaceWith(img);
+    });
+
+    var styles = Array.prototype.map.call(
+        document.querySelectorAll('link[rel="stylesheet"], style'),
+        function (n) { return n.outerHTML; }).join('\n');
+    var esc = function (t) { var d = document.createElement('div'); d.textContent = t; return d.innerHTML; };
+
+    var w = window.open('', '_blank');
+    if (!w) { alert('Allow pop-ups for this site to export the PDF.'); return; }
+    w.document.write('<!doctype html><html data-theme="light"><head><meta charset="utf-8">'
+        + '<title>' + esc(btn.dataset.file) + '</title>' + styles
+        + '<style>'
+        + 'body{background:#fff;padding:24px;margin:0;-webkit-print-color-adjust:exact;print-color-adjust:exact;}'
+        + '.wsr-card,.wsr-tile,.wsr-warn{break-inside:avoid;}'
+        + '.wsr-table a{color:inherit;}'
+        + '.wsr-pdf-head{margin-bottom:18px;border-bottom:2px solid #e2e8f0;padding-bottom:12px;}'
+        + '.wsr-pdf-head h1{font-size:20px;font-weight:800;margin:0 0 4px;}'
+        + '.wsr-pdf-head div{font-size:12px;color:#64748b;}'
+        + '@page{size:A4 landscape;margin:12mm;}'
+        + '</style></head><body>'
+        + '<div class="wsr-pdf-head"><h1>Task time report — ' + esc(btn.dataset.who) + '</h1>'
+        + '<div>' + esc(btn.dataset.range) + ' · generated ' + esc(new Date().toLocaleString()) + '</div></div>'
+        + copy.outerHTML + '</body></html>');
+    w.document.close();
+    // Give the stylesheets a moment to load before printing, or the PDF comes out unstyled.
+    // onload can fire before this handler is attached in some browsers, hence the fallback.
+    var printed = false;
+    var go = function () { if (printed) return; printed = true; w.focus(); w.print(); };
+    w.onload = function () { setTimeout(go, 300); };
+    setTimeout(go, 1500);
+}
+
 // Chart.js is loaded by footer.php, i.e. after this markup, so defer until parsing is done.
 document.addEventListener('DOMContentLoaded', function () {
     var el = document.getElementById('wsrChart');
