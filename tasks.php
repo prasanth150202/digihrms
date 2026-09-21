@@ -2263,11 +2263,14 @@ function wsbResetCols(form) {
                     }
                 });
                 tick();
+                document.dispatchEvent(new Event('wsb:timers'));
             }, 0);
         });
     });
 })();
 </script>
+
+<?php include __DIR__ . '/focus_pip.php'; ?>
 
 <?php endif; ?>
 
