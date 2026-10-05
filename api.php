@@ -330,7 +330,18 @@ if ($endpoint === 'tasks') {
             if (!$task) api_error('Task not found.', 404);
             api_ok($task);
         }
-        api_error('ID required.', 400);
+        // List a project's tasks (DigiOps pulls these into the linked brand)
+        if (!empty($_GET['project_id'])) {
+            $stmt = $conn->prepare(
+                "SELECT t.id, t.project_id, t.title, t.description, t.priority, t.status, t.due_date,
+                        t.assigned_to, u.name AS assigned_name, t.created_at, t.updated_at
+                 FROM tasks t LEFT JOIN users u ON u.id = t.assigned_to
+                 WHERE t.project_id = ? AND t.deleted_at IS NULL ORDER BY t.id LIMIT 1000"
+            );
+            $stmt->execute([(int)$_GET['project_id']]);
+            api_ok($stmt->fetchAll());
+        }
+        api_error('ID or project_id required.', 400);
     }
     if ($method === 'POST') {
         if (empty($body['title'])) api_error("Field 'title' is required.");
