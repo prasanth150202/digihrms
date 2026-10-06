@@ -75,9 +75,26 @@ $stmt->execute([$id]);
 $task = $stmt->fetch();
 if (!$task) { set_flash('danger','Task not found.'); header("Location: tasks.php"); exit; }
 
-// Access check: employee can only see own tasks
+// Access check: employee can only see own tasks (or tasks someone is waiting on them for)
 if ($role === 'EMPLOYEE' && $task['assigned_to'] != $uid && $task['assigned_by'] != $uid) {
-    set_flash('danger','Access denied.'); header("Location: tasks.php"); exit;
+    $brAccess = $conn->prepare("SELECT 1 FROM task_block_requests WHERE task_id=? AND requested_user_id=? LIMIT 1");
+    $brAccess->execute([$id, $uid]);
+    if (!$brAccess->fetchColumn()) {
+        set_flash('danger','Access denied.'); header("Location: tasks.php"); exit;
+    }
+}
+
+// The pending block request aimed at me that has not been passed on yet —
+// lets me block on someone else in turn (A → B → C).
+$my_leaf_block = null;
+if ($task['status'] === 'BLOCKED') {
+    $mlb = $conn->prepare("SELECT br.*, u.name as requester_name FROM task_block_requests br
+        JOIN users u ON u.id = br.requested_by
+        WHERE br.task_id=? AND br.requested_user_id=? AND br.status='pending'
+          AND NOT EXISTS (SELECT 1 FROM task_block_requests c WHERE c.parent_id=br.id AND c.status='pending')
+        ORDER BY br.id DESC LIMIT 1");
+    $mlb->execute([$id, $uid]);
+    $my_leaf_block = $mlb->fetch() ?: null;
 }
 
 $is_internaldigi_flow = $task['description'] && strpos($task['description'], '[internaldigi workflow]') !== false;
@@ -252,6 +269,67 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             } catch (Exception $e) { /* swallow — local update already succeeded */ }
         }
         set_flash('success', 'Work submitted. Awaiting DigiOps manager review.');
+        header("Location: task_detail.php?id=$id"); exit;
+    }
+
+    // Chained block — the person this task is waiting on passes it on to someone else
+    if ($_POST['action'] === 'block_task' && !$hr_view && $my_leaf_block) {
+        $req_uid = (int)($_POST['requested_user_id'] ?? 0) ?: null;
+        $desc    = trim($_POST['description'] ?? '');
+
+        if (!$req_uid || $desc === '') {
+            set_flash('danger', 'Please select a person and describe what you need.');
+            header("Location: task_detail.php?id=$id"); exit;
+        }
+        if ($req_uid == $uid) {
+            set_flash('danger', 'You cannot block on yourself.');
+            header("Location: task_detail.php?id=$id"); exit;
+        }
+        // Don't loop back to someone the task is already waiting on
+        $dup = $conn->prepare("SELECT 1 FROM task_block_requests WHERE task_id=? AND requested_user_id=? AND status='pending' LIMIT 1");
+        $dup->execute([$id, $req_uid]);
+        if ($dup->fetchColumn()) {
+            set_flash('danger', 'This task is already waiting on that person.');
+            header("Location: task_detail.php?id=$id"); exit;
+        }
+
+        $req_person = $conn->prepare("SELECT id, name, role FROM users WHERE id = ?");
+        $req_person->execute([$req_uid]);
+        $req_person = $req_person->fetch();
+        if (!$req_person) {
+            set_flash('danger', 'Selected person not found.');
+            header("Location: task_detail.php?id=$id"); exit;
+        }
+
+        $conn->prepare("INSERT INTO task_block_requests (task_id,parent_id,requested_by,requested_role,requested_user_id,request_type,description) VALUES (?,?,?,?,?,?,?)")
+             ->execute([$id, $my_leaf_block['id'], $uid, $req_person['role'], $req_uid, 'text', $desc]);
+        $chain_msg = "🔁 " . ($u['name'] ?? 'Someone') . " is now waiting on " . $req_person['name'] . ": {$desc}";
+        $conn->prepare("INSERT INTO task_comments (task_id,user_id,comment) VALUES (?,?,?)")
+             ->execute([$id, $uid, $chain_msg]);
+        log_task_activity($conn, $id, $uid, 'BLOCKED', mb_substr("Passed on to {$req_person['name']}: {$desc}", 0, 120));
+
+        hrms_notify($conn, (int)$req_uid, 'block_request', "Action needed: " . mb_substr($task['title'], 0, 60),
+            ($u['name'] ?? 'Someone') . " is waiting on you: {$desc}", "task_detail.php?id={$id}");
+        // Let the person who blocked me know where it went
+        if ($my_leaf_block['requested_by'] != $uid) {
+            hrms_notify($conn, (int)$my_leaf_block['requested_by'], 'block_request', 'Block passed on: ' . mb_substr($task['title'], 0, 60),
+                ($u['name'] ?? 'Someone') . " is now waiting on " . $req_person['name'] . " for your request.", "task_detail.php?id={$id}");
+        }
+        if ($is_internaldigi_flow) {
+            $ops = digiops_db();
+            if ($ops) {
+                try {
+                    $st = $ops->prepare('SELECT id FROM brand_tasks WHERE hrms_task_id = ? LIMIT 1');
+                    $st->execute([$id]);
+                    $opsTask = $st->fetch();
+                    if ($opsTask) {
+                        $ops->prepare('INSERT INTO task_comments (task_id,user_id,user_name,comment,source) VALUES (?,?,?,?,?)')
+                            ->execute([$opsTask['id'], null, $u['name'] ?? 'HRMS', $chain_msg, 'hrms']);
+                    }
+                } catch (Exception $e) { /* swallow */ }
+            }
+        }
+        set_flash('warning', 'Block passed on. ' . $req_person['name'] . ' has been notified.');
         header("Location: task_detail.php?id=$id"); exit;
     }
 
@@ -610,18 +688,19 @@ $ur = $conn->prepare("SELECT id, name FROM users WHERE role NOT IN ('HR_ADMIN') 
 $ur->execute([$uid]);
 $all_users_flat = $ur->fetchAll();
 
-// Fetch active block request for this task
-$active_block = null;
+// Fetch the active block chain for this task (A → B → C, oldest first)
+$block_chain = [];
 if ($task['status'] === 'BLOCKED') {
     $abr = $conn->prepare("SELECT br.*, u.name as requester_name, u2.name as assignee_name
         FROM task_block_requests br
         JOIN users u ON u.id = br.requested_by
         LEFT JOIN users u2 ON u2.id = br.requested_user_id
         WHERE br.task_id = ? AND br.status = 'pending'
-        ORDER BY br.created_at DESC LIMIT 1");
+        ORDER BY br.id ASC");
     $abr->execute([$id]);
-    $active_block = $abr->fetch();
+    $block_chain = $abr->fetchAll();
 }
+$chaining_block = !$hr_view && $task['status'] === 'BLOCKED' && $my_leaf_block;
 
 include 'header.php';
 ?>
@@ -1437,15 +1516,25 @@ include 'header.php';
     <?php endif; ?>
 
     <!-- Block Task — structured request -->
-    <?php if (!$hr_view && !in_array($task['status'], ['BLOCKED','DONE']) && $can_act_display): ?>
+    <?php if ((!$hr_view && !in_array($task['status'], ['BLOCKED','DONE']) && $can_act_display) || $chaining_block): ?>
     <div class="card border-danger shadow-sm mb-4" style="border-radius:14px;">
         <div class="card-header bg-danger-subtle fw-semibold border-0 text-danger" style="border-radius:14px 14px 0 0;cursor:pointer;"
              data-bs-toggle="collapse" data-bs-target="#blockForm">
+            <?php if ($chaining_block): ?>
+            <i class="bi bi-arrow-right-circle me-1"></i> Need Someone Else? Pass It On
+            <?php else: ?>
             <i class="bi bi-slash-circle me-1"></i> Block This Task — Needs Input
+            <?php endif; ?>
             <i class="bi bi-chevron-down float-end" style="font-size:.8rem;margin-top:2px;"></i>
         </div>
-        <div class="collapse" id="blockForm">
+        <div class="collapse<?= $chaining_block ? ' show' : '' ?>" id="blockForm">
         <div class="card-body p-3">
+            <?php if ($chaining_block): ?>
+            <div class="small text-muted mb-2">
+                <?= sanitize($my_leaf_block['requester_name']) ?> is waiting on you. If you need input from someone else first, block on them —
+                the task stays blocked until they answer you and you resolve <?= sanitize($my_leaf_block['requester_name']) ?>'s request.
+            </div>
+            <?php endif; ?>
             <form method="POST">
                 <input type="hidden" name="action" value="block_task">
                 <div class="mb-2">
@@ -1506,15 +1595,27 @@ include 'header.php';
     <?php endif; ?>
 
     <!-- Active block request details (shown when task is blocked) -->
-    <?php if ($task['status'] === 'BLOCKED' && $active_block): ?>
+    <?php if ($task['status'] === 'BLOCKED' && $block_chain): ?>
     <div class="card border-warning shadow-sm mb-4" style="border-radius:14px;">
         <div class="card-header bg-warning-subtle fw-semibold border-0" style="border-radius:14px 14px 0 0;">
             <i class="bi bi-hourglass-split me-1 text-warning"></i> Waiting on Someone
+            <?php if (count($block_chain) > 1): ?>
+            <span class="badge bg-warning text-dark ms-1"><?= count($block_chain) ?> in chain</span>
+            <?php endif; ?>
         </div>
         <div class="card-body p-3 small">
-            <div class="mb-1"><span class="text-muted">Blocked by:</span> <strong><?= sanitize($active_block['requester_name']) ?></strong></div>
-            <div class="mb-2"><span class="text-muted">Waiting on:</span> <strong><?= sanitize($active_block['assignee_name'] ?? '—') ?></strong></div>
-            <div class="p-2 rounded" style="background:#fef9c3;"><?= nl2br(sanitize($active_block['description'])) ?></div>
+            <?php foreach ($block_chain as $i => $bc): ?>
+            <div class="<?= $i ? 'mt-3 pt-3 border-top' : '' ?>">
+                <div class="mb-1"><strong><?= sanitize($bc['requester_name']) ?></strong>
+                    <i class="bi bi-arrow-right mx-1 text-muted"></i>
+                    <strong><?= sanitize($bc['assignee_name'] ?? '—') ?></strong>
+                    <?php if ($i === count($block_chain) - 1): ?>
+                    <span class="badge bg-danger-subtle text-danger ms-1">current</span>
+                    <?php endif; ?>
+                </div>
+                <div class="p-2 rounded" style="background:#fef9c3;"><?= nl2br(sanitize($bc['description'])) ?></div>
+            </div>
+            <?php endforeach; ?>
         </div>
     </div>
     <?php endif; ?>

@@ -679,6 +679,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         $conn->prepare("UPDATE task_block_requests SET status='resolved', response_text=?, response_file=?, resolved_by=?, resolved_at=NOW() WHERE id=?")
              ->execute([$final_response, $upload_path, $uid, $br_id]);
 
+        // Anything this request was passed on to is no longer needed — close the rest of the chain
+        $close_ids = [$br_id];
+        while ($close_ids) {
+            $in = implode(',', array_map('intval', $close_ids));
+            $close_ids = $conn->query("SELECT id FROM task_block_requests WHERE parent_id IN ($in) AND status='pending'")
+                              ->fetchAll(PDO::FETCH_COLUMN);
+            if ($close_ids) {
+                $conn->prepare("UPDATE task_block_requests SET status='resolved', response_text='Closed — the request it was passed on from was resolved.', resolved_by=?, resolved_at=NOW() WHERE id IN (" . implode(',', array_map('intval', $close_ids)) . ")")
+                     ->execute([$uid]);
+            }
+        }
+
+        // Chained request (B asked C) — hand it back to B; the task stays blocked until B resolves theirs
+        if (!empty($br['parent_id'])) {
+            $parent = $conn->prepare("SELECT br.*, u.name AS target_name FROM task_block_requests br
+                LEFT JOIN users u ON u.id = br.requested_user_id WHERE br.id=? AND br.status='pending'");
+            $parent->execute([$br['parent_id']]);
+            $parent = $parent->fetch();
+            if ($parent) {
+                $conn->prepare("INSERT INTO task_comments (task_id,user_id,comment) VALUES (?,?,?)")
+                     ->execute([$br['task_id'], $uid, "✅ " . ($u['name'] ?? 'user') . " answered: " . $final_response
+                        . ($upload_path ? " [file attached]" : "") . " — back with " . ($parent['target_name'] ?? 'previous person')]);
+                if ($br['requested_by'] != $uid) {
+                    hrms_notify($conn, (int)$br['requested_by'], 'block_resolved', 'Your request was answered: ' . mb_substr($br['title'], 0, 60),
+                        ($u['name'] ?? 'Someone') . " answered your request. The task is still waiting on you — resolve it to unblock.", 'task_detail.php?id=' . $br['task_id']);
+                }
+                set_flash('success', 'Request resolved. Handed back to ' . ($parent['target_name'] ?? 'the previous person') . '.');
+                header("Location: tasks.php?tab=block_requests"); exit;
+            }
+        }
+
         // Auto-unblock the task — goes back to TODO so assignee re-picks it up
         $conn->prepare("UPDATE tasks SET status='TODO', blocked_reason=NULL, unblocked_at=NOW() WHERE id=? AND status='BLOCKED'")
              ->execute([$br['task_id']]);
@@ -800,7 +831,11 @@ if (in_array($tab, ['board','report'], true) && !$workspace_beta) $tab = 'my';
 $my_block_requests = [];
 if (!$hr_view) {
     $brq = $conn->prepare("SELECT br.*, t.title as task_title, t.id as task_id,
-        u.name as requester_name, u2.name as specific_person
+        u.name as requester_name, u2.name as specific_person,
+        (SELECT pu.name FROM task_block_requests p JOIN users pu ON pu.id = p.requested_by
+            WHERE p.id = br.parent_id) as parent_requester_name,
+        (SELECT cu.name FROM task_block_requests c JOIN users cu ON cu.id = c.requested_user_id
+            WHERE c.parent_id = br.id AND c.status = 'pending' LIMIT 1) as waiting_on_name
         FROM task_block_requests br
         JOIN tasks t ON t.id = br.task_id
         JOIN users u ON u.id = br.requested_by
@@ -811,6 +846,16 @@ if (!$hr_view) {
         ORDER BY br.created_at DESC");
     $brq->execute([$uid, $uid]);
     $my_block_requests = $brq->fetchAll();
+
+    // Answers from people I passed my requests on to
+    $br_child_answers = [];
+    if ($my_block_requests) {
+        $in = implode(',', array_map('intval', array_column($my_block_requests, 'id')));
+        $ca = $conn->query("SELECT c.parent_id, c.response_text, c.response_file, cu.name as answered_by
+            FROM task_block_requests c LEFT JOIN users cu ON cu.id = c.resolved_by
+            WHERE c.parent_id IN ($in) AND c.status = 'resolved' ORDER BY c.resolved_at");
+        foreach ($ca->fetchAll() as $row) $br_child_answers[$row['parent_id']][] = $row;
+    }
 }
 
 // ── FETCH TASKS ───────────────────────────────────────────
@@ -3659,10 +3704,31 @@ $type_label = ['document'=>'Document / File','link'=>'Link / URL','text'=>'Text 
                     <?php if ($br['specific_person']): ?>
                     → specifically for <strong><?= sanitize($br['specific_person']) ?></strong>
                     <?php endif; ?>
+                    <?php if ($br['parent_requester_name']): ?>
+                    <span class="text-muted">(passed on from <?= sanitize($br['parent_requester_name']) ?>'s request)</span>
+                    <?php endif; ?>
                 </div>
                 <div class="p-3 rounded mb-0" style="background:#fef2f2;border:1px solid #fecaca;font-size:.85rem;">
                     <div class="fw-semibold text-danger mb-1"><i class="bi bi-exclamation-circle me-1"></i>What they need:</div>
                     <?= nl2br(sanitize($br['description'])) ?>
+                </div>
+                <?php foreach ($br_child_answers[$br['id']] ?? [] as $ans): ?>
+                <div class="p-3 rounded mt-2" style="background:#f0fdf4;border:1px solid #bbf7d0;font-size:.85rem;">
+                    <div class="fw-semibold text-success mb-1"><i class="bi bi-check-circle me-1"></i><?= sanitize($ans['answered_by'] ?? 'Someone') ?> answered you:</div>
+                    <?= nl2br(sanitize($ans['response_text'] ?? '')) ?>
+                    <?php if ($ans['response_file']): ?>
+                    <div class="mt-1"><a href="<?= sanitize($ans['response_file']) ?>" target="_blank"><i class="bi bi-paperclip me-1"></i>Attached file</a></div>
+                    <?php endif; ?>
+                </div>
+                <?php endforeach; ?>
+                <div class="mt-2" style="font-size:.82rem;">
+                    <?php if ($br['waiting_on_name']): ?>
+                    <span class="badge bg-warning text-dark"><i class="bi bi-hourglass-split me-1"></i>Waiting on <?= sanitize($br['waiting_on_name']) ?></span>
+                    <?php else: ?>
+                    <a href="task_detail.php?id=<?= $br['task_id'] ?>#blockForm" class="text-decoration-none">
+                        <i class="bi bi-arrow-right-circle me-1"></i>Need someone else first? Pass it on
+                    </a>
+                    <?php endif; ?>
                 </div>
             </div>
 
