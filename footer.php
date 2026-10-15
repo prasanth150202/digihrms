@@ -150,6 +150,34 @@ function showConfirm(msg, { title='Are you sure?', okText='Confirm', okColor='#e
         };
     });
 }
+
+// ── No double submit ──────────────────────────────────────────────────────
+// A double-click on a POST form's submit button sent it twice (e.g. two tasks).
+// Runs after the page's own submit handlers (bubble phase on document), so forms
+// that cancel the submit to post via fetch are left alone. Unlocks after a few
+// seconds for forms that don't navigate away (file downloads), and on back/forward.
+(function () {
+    const LOCK_MS = 6000;
+    function unlock(form) {
+        delete form.dataset.submitting;
+        form.querySelectorAll('[data-dbl-locked]').forEach(b => { b.disabled = false; b.removeAttribute('data-dbl-locked'); });
+    }
+    document.addEventListener('submit', function (e) {
+        const form = e.target;
+        if (!(form instanceof HTMLFormElement) || e.defaultPrevented) return;
+        if ((form.method || '').toLowerCase() !== 'post' || form.target === '_blank' || form.hasAttribute('data-allow-resubmit')) return;
+        if (form.dataset.submitting) { e.preventDefault(); return; }
+        form.dataset.submitting = '1';
+        // Disable after this tick so the clicked button's name/value still goes with the form
+        setTimeout(() => {
+            form.querySelectorAll('button[type=submit], button:not([type]), input[type=submit]').forEach(b => {
+                if (!b.disabled) { b.disabled = true; b.setAttribute('data-dbl-locked', '1'); }
+            });
+        }, 0);
+        setTimeout(() => unlock(form), LOCK_MS);
+    });
+    window.addEventListener('pageshow', () => document.querySelectorAll('form[data-submitting]').forEach(unlock));
+})();
 </script>
 
 <?php
