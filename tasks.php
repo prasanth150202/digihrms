@@ -122,6 +122,15 @@ $all_tls = $conn->query("
     GROUP BY u.id ORDER BY u.name
 ")->fetchAll();
 
+// Everyone a task can be sent to (Send Task modal) — active employees with a login
+$all_people = $conn->query("
+    SELECT u.id, u.name, MAX(d.name) as dept_name
+    FROM users u
+    JOIN employees e ON e.email = u.email AND e.status IN ('ACTIVE','PROBATION')
+    LEFT JOIN departments d ON d.id = e.dept_id
+    GROUP BY u.id ORDER BY u.name
+")->fetchAll();
+
 // Projects
 $projects = $conn->query("SELECT id, name FROM projects WHERE status='ACTIVE' ORDER BY name")->fetchAll();
 
@@ -304,20 +313,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         header("Location: tasks.php?tab=bin"); exit;
     }
 
-    // Cross-team request (any role except HR)
+    // Send a task to anyone (any role except HR). It waits as REQUESTED until they accept;
+    // a team lead can instead approve it and assign it to someone in their team.
     if ($_POST['action'] === 'cross_request' && !$hr_view) {
+        $to_id = (int)($_POST['to_tl_id'] ?? 0);
+        if (!$to_id || $to_id === (int)$uid) { set_flash('danger', 'Pick who to send the task to.'); header("Location: tasks.php?tab=outgoing"); exit; }
         $conn->prepare("INSERT INTO tasks (title,description,project_id,from_dept_id,to_tl_id,assigned_by,priority,due_date,estimated_hours,status) VALUES (?,?,?,?,?,?,?,?,?,'REQUESTED')")
              ->execute([
                  $_POST['title'], $_POST['description'],
                  $_POST['project_id'] ?: null,
                  $_POST['from_dept_id'] ?: null,
-                 $_POST['to_tl_id'],
+                 $to_id,
                  $uid,
                  $_POST['priority'],
                  $_POST['due_date'] ?: null,
                  $_POST['estimated_hours'] ?: null
              ]);
-        set_flash('success', 'Request sent to team lead.');
+        $new_id = (int)$conn->lastInsertId();
+        log_task_activity($conn, $new_id, $uid, 'CREATED', 'Sent task: '.trim($_POST['title']));
+        hrms_notify($conn, $to_id, 'task_assigned',
+            'Task request: ' . mb_substr(trim($_POST['title']), 0, 60),
+            'From ' . ($u['name'] ?? 'a colleague') . ' — accept it to start working on it.',
+            'tasks.php?tab=incoming'
+        );
+        set_flash('success', 'Task sent. You can follow its status here.');
         header("Location: tasks.php?tab=outgoing"); exit;
     }
 
@@ -326,6 +345,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         $tid         = (int)$_POST['task_id'];
         $assignee_id = (int)$_POST['assigned_to'];
         $needs_appr  = !empty($_POST['needs_approval']) ? 1 : 0;
+        $req_by = $conn->prepare("SELECT assigned_by FROM tasks WHERE id=? AND to_tl_id=? AND status='REQUESTED'");
+        $req_by->execute([$tid, $uid]);
+        $requester_id = (int)($req_by->fetchColumn() ?: 0);
         $conn->prepare("UPDATE tasks SET status='TODO', assigned_to=?, assigned_by=?, needs_approval=? WHERE id=? AND to_tl_id=?")
              ->execute([$assignee_id, $uid, $needs_appr, $tid, $uid]);
         $conn->prepare("INSERT INTO task_comments (task_id,user_id,comment) VALUES (?,?,?)")
@@ -343,17 +365,50 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 'task_detail.php?id=' . $tid
             );
         }
+        if ($requester_id && $requester_id !== $uid) {
+            hrms_notify($conn, $requester_id, 'task_assigned', 'Your task was accepted',
+                ($u['name'] ?? 'The team lead') . ' assigned it to their team. Track it in My Requests.', 'tasks.php?tab=outgoing');
+        }
         if ($is_ajax) ajax_ok();
         set_flash('success', 'Request approved and task assigned.');
         header("Location: tasks.php?tab=incoming"); exit;
     }
 
-    // TL rejects request
-    if ($_POST['action'] === 'reject_request' && $is_tl) {
+    // Recipient accepts a task sent to them and takes it on themselves
+    if ($_POST['action'] === 'accept_request') {
         $tid = (int)$_POST['task_id'];
+        $req = $conn->prepare("SELECT title, assigned_by FROM tasks WHERE id=? AND to_tl_id=? AND status='REQUESTED' AND deleted_at IS NULL");
+        $req->execute([$tid, $uid]);
+        $req = $req->fetch();
+        if (!$req) { if ($is_ajax) ajax_err('Request not found or already handled'); set_flash('danger','Request not found or already handled.'); header("Location: tasks.php?tab=incoming"); exit; }
+        $conn->prepare("UPDATE tasks SET status='TODO', assigned_to=? WHERE id=? AND to_tl_id=? AND status='REQUESTED'")
+             ->execute([$uid, $tid, $uid]);
+        log_task_activity($conn, $tid, $uid, 'APPROVED', 'Accepted the task');
+        _fire_task_trigger('task_created', $tid, $uid);
+        if ((int)$req['assigned_by'] && (int)$req['assigned_by'] !== (int)$uid) {
+            hrms_notify($conn, (int)$req['assigned_by'], 'task_assigned',
+                'Task accepted: ' . mb_substr($req['title'], 0, 60),
+                ($u['name'] ?? 'They') . ' accepted it. Track it in My Requests.', 'tasks.php?tab=outgoing');
+        }
+        if ($is_ajax) ajax_ok();
+        set_flash('success', 'Task accepted — it is now in your tasks.');
+        header("Location: tasks.php?tab=incoming"); exit;
+    }
+
+    // Recipient declines a task sent to them
+    if ($_POST['action'] === 'reject_request') {
+        $tid = (int)$_POST['task_id'];
+        $req = $conn->prepare("SELECT title, assigned_by FROM tasks WHERE id=? AND to_tl_id=? AND status='REQUESTED'");
+        $req->execute([$tid, $uid]);
+        $req = $req->fetch();
         $conn->prepare("UPDATE tasks SET status='REJECTED', reject_reason=? WHERE id=? AND to_tl_id=?")
              ->execute([$_POST['reject_reason'], $tid, $uid]);
         log_task_activity($conn, $tid, $uid, 'REJECTED', 'Reason: '.trim($_POST['reject_reason']));
+        if ($req && (int)$req['assigned_by'] && (int)$req['assigned_by'] !== (int)$uid) {
+            hrms_notify($conn, (int)$req['assigned_by'], 'task_assigned',
+                'Task declined: ' . mb_substr($req['title'], 0, 60),
+                ($u['name'] ?? 'They') . ': ' . mb_substr(trim($_POST['reject_reason']), 0, 100), 'tasks.php?tab=outgoing');
+        }
         if ($is_ajax) ajax_ok();
         set_flash('danger', 'Request rejected.');
         header("Location: tasks.php?tab=incoming"); exit;
@@ -1171,9 +1226,9 @@ if ($workspace_beta && ($tab === 'report' || isset($_GET['export']))) {
     }
 }
 
-// Incoming requests (TL only)
+// Incoming requests — tasks sent to me waiting for me to accept (or, for a TL, to assign)
 $incoming = [];
-if ($is_tl) {
+if (!$hr_view) {
     $s = $conn->prepare("SELECT t.*, u.name as requester_name, d.name as from_dept, p.name as project_name
         FROM tasks t
         LEFT JOIN users u ON u.id=t.assigned_by
@@ -1193,9 +1248,10 @@ if (!$hr_view) {
         LEFT JOIN users u  ON u.id=t.to_tl_id
         LEFT JOIN users ua ON ua.id=t.assigned_to
         LEFT JOIN projects p ON p.id=t.project_id
-        WHERE t.assigned_by=? AND t.to_tl_id IS NOT NULL AND t.deleted_at IS NULL
+        WHERE t.to_tl_id IS NOT NULL AND t.deleted_at IS NULL
+          AND (t.assigned_by=? OR t.id IN (SELECT task_id FROM task_activity_logs WHERE action='CREATED' AND user_id=?))
         ORDER BY t.created_at DESC");
-    $s->execute([$uid]);
+    $s->execute([$uid, $uid]);
     $outgoing = $s->fetchAll();
 }
 
@@ -1743,7 +1799,7 @@ $status_color   = ['TODO'=>'secondary','IN_PROGRESS'=>'primary','REVIEW'=>'warni
     <div class="d-flex gap-2 flex-wrap">
         <?php if (!$hr_view): ?>
         <button class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#crossModal" style="border-radius:8px;">
-            <i class="bi bi-send me-1"></i> Request to Team
+            <i class="bi bi-send me-1"></i> Send Task
         </button>
         <?php endif; ?>
         <?php if ($is_tl && !$hr_view): ?>
@@ -1896,7 +1952,7 @@ if (!empty($flash)): ?>
         <span class="tab-badge"><?= count($my_team) ?></span>
     </a>
     <?php endif; ?>
-    <?php if ($is_tl && !$hr_view): ?>
+    <?php if (!$hr_view && ($is_tl || $incoming)): ?>
     <a class="tm-tab <?= $tab==='incoming'?'active':'' ?>" href="?tab=incoming">
         <i class="bi bi-inbox-fill"></i> Incoming
         <?php if ($stats['incoming']): ?>
@@ -3447,13 +3503,13 @@ $kanban_cols = [
 <?php if ($is_frag): exit; endif; ?>
 
 <!-- ── TAB: INCOMING REQUESTS ─────────────────────────── -->
-<?php elseif ($tab === 'incoming' && $is_tl): ?>
+<?php elseif ($tab === 'incoming' && !$hr_view): ?>
 
 <?php if (!$incoming): ?>
 <div class="text-center py-5 bg-white rounded-3 shadow-sm">
     <i class="bi bi-inbox" style="font-size:3rem;color:#cbd5e1;"></i>
     <p class="text-muted mt-3 mb-0 fw-semibold">No pending requests</p>
-    <p class="text-muted small">All cross-team requests have been handled.</p>
+    <p class="text-muted small">Tasks people send you show up here to accept.</p>
 </div>
 <?php else: ?>
 <div class="d-flex flex-column gap-3">
@@ -3481,12 +3537,17 @@ $kanban_cols = [
                 <p class="mt-2 mb-0" style="font-size:.8rem;color:#475569;background:#f8fafc;border-radius:8px;padding:10px;"><?= sanitize($t['description']) ?></p>
                 <?php endif; ?>
             </div>
-            <div class="d-flex gap-2 flex-shrink-0">
-                <button class="btn btn-success btn-sm" onclick="openApprove(<?= $t['id'] ?>)" style="border-radius:8px;">
-                    <i class="bi bi-check2 me-1"></i> Approve &amp; Assign
+            <div class="d-flex gap-2 flex-shrink-0 flex-wrap">
+                <button class="btn btn-success btn-sm" onclick="acceptRequest(<?= $t['id'] ?>, this)" style="border-radius:8px;min-height:44px;">
+                    <i class="bi bi-check2 me-1"></i> Accept
                 </button>
-                <button class="btn btn-outline-danger btn-sm" onclick="openReject(<?= $t['id'] ?>)" style="border-radius:8px;">
-                    <i class="bi bi-x-lg me-1"></i> Reject
+                <?php if ($is_tl): ?>
+                <button class="btn btn-outline-success btn-sm" onclick="openApprove(<?= $t['id'] ?>)" style="border-radius:8px;min-height:44px;">
+                    <i class="bi bi-person-plus me-1"></i> Assign to Team
+                </button>
+                <?php endif; ?>
+                <button class="btn btn-outline-danger btn-sm" onclick="openReject(<?= $t['id'] ?>)" style="border-radius:8px;min-height:44px;">
+                    <i class="bi bi-x-lg me-1"></i> Decline
                 </button>
             </div>
         </div>
@@ -3503,7 +3564,7 @@ $kanban_cols = [
 <div class="text-center py-5 bg-white rounded-3 shadow-sm">
     <i class="bi bi-send" style="font-size:3rem;color:#cbd5e1;"></i>
     <p class="text-muted mt-3 mb-0 fw-semibold">No outgoing requests</p>
-    <p class="text-muted small">You haven't sent any cross-team requests yet.</p>
+    <p class="text-muted small">Tasks you send to people show up here with their status.</p>
 </div>
 <?php else: ?>
 
@@ -3528,7 +3589,7 @@ $kanban_cols = [
             <thead>
                 <tr>
                     <th class="ps-4">Task</th>
-                    <th>Sent To (TL)</th>
+                    <th>Sent To</th>
                     <th>Assigned To</th>
                     <th>Priority</th>
                     <th>Due Date</th>
@@ -3563,13 +3624,13 @@ $kanban_cols = [
                         <span style="font-size:.82rem;"><?= sanitize($t['assignee_name']) ?></span>
                     </div>
                     <?php else: ?>
-                    <span style="font-size:.78rem;color:#94a3b8;">Pending</span>
+                    <span style="font-size:.78rem;color:#94a3b8;"><?= $t['status']==='REJECTED' ? '—' : 'Not accepted yet' ?></span>
                     <?php endif; ?>
                 </td>
                 <td><span class="pri-badge pri-<?= $t['priority'] ?>"><?= $t['priority'] ?></span></td>
                 <td><span style="font-size:.82rem;color:#64748b;"><?= $t['due_date'] ? date('d M Y', strtotime($t['due_date'])) : '—' ?></span></td>
                 <td>
-                    <span class="sts-badge sts-<?= $t['status'] ?>"><?= str_replace('_',' ',$t['status']) ?></span>
+                    <span class="sts-badge sts-<?= $t['status'] ?>"><?= $t['status']==='REQUESTED' ? 'WAITING TO ACCEPT' : ($t['status']==='REJECTED' ? 'DECLINED' : str_replace('_',' ',$t['status'])) ?></span>
                     <?php if ($t['status']==='REJECTED' && $t['reject_reason']): ?>
                     <div style="font-size:.73rem;color:#b91c1c;margin-top:3px;"><i class="bi bi-info-circle me-1"></i><?= sanitize($t['reject_reason']) ?></div>
                     <?php endif; ?>
@@ -4638,8 +4699,8 @@ $cal_tasks_json = json_encode(array_values(array_map(function($t) {
             <input type="hidden" name="action" value="cross_request">
             <div class="modal-header border-0 pb-0 pt-4 px-4">
                 <div>
-                    <h5 class="modal-title fw-bold mb-0"><i class="bi bi-send-fill text-primary me-2"></i>Request from Another Team</h5>
-                    <p class="text-muted small mb-0 mt-1">Send a task request to another team lead</p>
+                    <h5 class="modal-title fw-bold mb-0"><i class="bi bi-send-fill text-primary me-2"></i>Send a Task</h5>
+                    <p class="text-muted small mb-0 mt-1">Send a task to anyone. Once they accept it, follow its status in My Requests.</p>
                 </div>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
@@ -4654,12 +4715,21 @@ $cal_tasks_json = json_encode(array_values(array_map(function($t) {
                         <textarea name="description" class="form-control" rows="3" placeholder="Explain what you need, why, and any constraints…" style="border-radius:8px;"></textarea>
                     </div>
                     <div class="col-md-6">
-                        <label class="form-label fw-semibold" style="font-size:.82rem;">Send To (Team Lead) <span class="text-danger">*</span></label>
+                        <label class="form-label fw-semibold" style="font-size:.82rem;">Send To <span class="text-danger">*</span></label>
                         <select name="to_tl_id" class="form-select" required style="border-radius:8px;">
-                            <option value="">— Select Team Lead —</option>
+                            <option value="">— Select a person —</option>
+                            <?php if ($all_tls): ?>
+                            <optgroup label="Team leads (can assign it to their team)">
                             <?php foreach ($all_tls as $tl): if ($tl['id'] != $uid): ?>
                             <option value="<?= $tl['id'] ?>"><?= sanitize($tl['name']) ?><?= $tl['dept_name'] ? ' — '.$tl['dept_name'] : '' ?></option>
                             <?php endif; endforeach; ?>
+                            </optgroup>
+                            <?php endif; ?>
+                            <optgroup label="Everyone">
+                            <?php $tl_ids = array_column($all_tls, 'id'); foreach ($all_people as $p): if ($p['id'] != $uid && !in_array($p['id'], $tl_ids)): ?>
+                            <option value="<?= $p['id'] ?>"><?= sanitize($p['name']) ?><?= $p['dept_name'] ? ' — '.$p['dept_name'] : '' ?></option>
+                            <?php endif; endforeach; ?>
+                            </optgroup>
                         </select>
                     </div>
                     <div class="col-md-6">
@@ -4928,18 +4998,18 @@ $cal_tasks_json = json_encode(array_values(array_map(function($t) {
             <input type="hidden" id="reject_task_id">
             <div class="modal-header border-0 pb-0 pt-4 px-4">
                 <div>
-                    <h5 class="modal-title fw-bold mb-0 text-danger"><i class="bi bi-x-circle-fill me-2"></i>Reject Request</h5>
-                    <p class="text-muted small mb-0 mt-1">Let the requester know why this can't be done</p>
+                    <h5 class="modal-title fw-bold mb-0 text-danger"><i class="bi bi-x-circle-fill me-2"></i>Decline Task</h5>
+                    <p class="text-muted small mb-0 mt-1">Let the sender know why you can't take this on</p>
                 </div>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body px-4 py-3">
                 <label class="form-label fw-semibold" style="font-size:.82rem;">Reason <span class="text-danger">*</span></label>
-                <textarea id="reject_reason" class="form-control" rows="3" placeholder="Explain why this request is being rejected…" style="border-radius:8px;"></textarea>
+                <textarea id="reject_reason" class="form-control" rows="3" placeholder="Explain why you are declining…" style="border-radius:8px;"></textarea>
             </div>
             <div class="modal-footer border-0 px-4 pb-4 pt-2 gap-2">
                 <button type="button" class="btn" data-bs-dismiss="modal" style="background:#f1f5f9;border:none;border-radius:8px;color:#475569;">Cancel</button>
-                <button type="button" class="btn btn-danger" style="border-radius:8px;" onclick="submitRejectRequest(this)"><i class="bi bi-x-lg me-1"></i> Reject</button>
+                <button type="button" class="btn btn-danger" style="border-radius:8px;" onclick="submitRejectRequest(this)"><i class="bi bi-x-lg me-1"></i> Decline</button>
             </div>
         </div>
     </div>
@@ -5832,6 +5902,19 @@ async function submitRework(btn) {
         const d = await r.json();
         if (!d.ok) { showToast(d.error||'Error', 'error'); btn.disabled=false; btn.innerHTML=orig; }
         else { bootstrap.Modal.getInstance(document.getElementById('reworkModal'))?.hide(); location.reload(); }
+    } catch(e) { btn.disabled=false; btn.innerHTML=orig; showToast('Network error', 'error'); }
+}
+
+async function acceptRequest(taskId, btn) {
+    const orig = btn.innerHTML;
+    btn.disabled=true; btn.innerHTML='<span class="hc-spinner"></span> Accepting…';
+    const fd = new FormData();
+    fd.append('_ajax','1'); fd.append('action','accept_request'); fd.append('task_id',taskId);
+    try {
+        const r = await fetch('tasks.php',{method:'POST',body:fd,credentials:'same-origin'});
+        const d = await r.json();
+        if (!d.ok) { showToast(d.error||'Error', 'error'); btn.disabled=false; btn.innerHTML=orig; }
+        else { location.reload(); }
     } catch(e) { btn.disabled=false; btn.innerHTML=orig; showToast('Network error', 'error'); }
 }
 
