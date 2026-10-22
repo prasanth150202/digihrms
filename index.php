@@ -689,6 +689,16 @@ $dept_data   = $conn->query("SELECT d.name, COUNT(e.id) as cnt FROM departments 
 $monthly     = $conn->query("SELECT DATE_FORMAT(joining_date,'%b %Y') as month, COUNT(*) as cnt FROM employees WHERE joining_date >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH) GROUP BY DATE_FORMAT(joining_date,'%Y-%m') ORDER BY joining_date")->fetchAll();
 $recent_cand = $conn->query("SELECT * FROM candidates ORDER BY created_at DESC LIMIT 5")->fetchAll();
 
+// Admins can assign tasks to themselves too, so show their own open ones here
+$ts = $conn->prepare("SELECT t.*, p.name as project_name
+    FROM tasks t LEFT JOIN projects p ON p.id=t.project_id
+    WHERE t.assigned_to=? AND t.deleted_at IS NULL AND t.status NOT IN ('REQUESTED','REJECTED','DONE')
+    ORDER BY FIELD(t.priority,'URGENT','HIGH','MEDIUM','LOW'), t.due_date ASC");
+$ts->execute([$u['id']]);
+$active_tasks   = $ts->fetchAll();
+$priority_color = ['LOW'=>'success','MEDIUM'=>'warning','HIGH'=>'danger','URGENT'=>'dark'];
+$status_color   = ['TODO'=>'secondary','IN_PROGRESS'=>'primary','REVIEW'=>'warning','REWORK'=>'warning','BLOCKED'=>'danger'];
+
 include 'header.php';
 ?>
 
@@ -711,6 +721,49 @@ include 'header.php';
         <div class="hrms-stat-value"><?= $val ?></div>
     </div>
     <?php endforeach; ?>
+</div>
+
+<!-- My Active Tasks -->
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-body p-4">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <div class="hrms-section-head mb-0"><i class="bi bi-list-task"></i> My Active Tasks</div>
+            <a href="tasks.php" class="btn btn-sm btn-outline-primary" style="font-size:12px;">View All &amp; Board</a>
+        </div>
+        <?php if (!$active_tasks): ?>
+        <div class="text-muted small text-center py-2">No active tasks assigned to you.</div>
+        <?php else: ?>
+        <div class="d-flex flex-column gap-2">
+        <?php foreach (array_slice($active_tasks, 0, 8) as $t):
+            $overdue = $t['due_date'] && $t['due_date'] < date('Y-m-d');
+        ?>
+        <div class="hrms-task-item d-flex justify-content-between align-items-start">
+            <div style="flex:1;min-width:0;">
+                <div class="d-flex align-items-center gap-1 flex-wrap mb-1">
+                    <span class="badge bg-<?= $priority_color[$t['priority']] ?? 'secondary' ?> rounded-pill" style="font-size:.6rem;"><?= $t['priority'] ?></span>
+                    <span class="badge bg-<?= $status_color[$t['status']] ?? 'secondary' ?> rounded-pill" style="font-size:.6rem;"><?= str_replace('_',' ',$t['status']) ?></span>
+                    <?php if ($overdue): ?><span class="badge bg-danger rounded-pill" style="font-size:.6rem;">OVERDUE</span><?php endif; ?>
+                </div>
+                <div style="font-weight:600;font-size:13px;" class="text-truncate">
+                    <a href="task_detail.php?id=<?= $t['id'] ?>" style="text-decoration:none;color:var(--text-primary);"><?= sanitize($t['title']) ?></a>
+                </div>
+                <?php if ($t['project_name']): ?>
+                <div style="font-size:.68rem;color:var(--text-muted);margin-top:2px;"><i class="bi bi-folder me-1"></i><?= sanitize($t['project_name']) ?></div>
+                <?php endif; ?>
+            </div>
+            <?php if ($t['due_date']): ?>
+            <div style="font-size:12px;color:var(--text-muted);margin-left:12px;flex-shrink:0;"><?= date('d M', strtotime($t['due_date'])) ?></div>
+            <?php endif; ?>
+        </div>
+        <?php endforeach; ?>
+        </div>
+        <?php if (count($active_tasks) > 8): ?>
+        <div class="text-center mt-3">
+            <a href="tasks.php" style="font-size:12px;color:var(--text-muted);">+<?= count($active_tasks) - 8 ?> more tasks</a>
+        </div>
+        <?php endif; ?>
+        <?php endif; ?>
+    </div>
 </div>
 
 <!-- Charts -->
