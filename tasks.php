@@ -313,9 +313,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
         header("Location: tasks.php?tab=bin"); exit;
     }
 
-    // Send a task to anyone (any role except HR). It waits as REQUESTED until they accept;
+    // Send a task to anyone (HR included). It waits as REQUESTED until they accept;
     // a team lead can instead approve it and assign it to someone in their team.
-    if ($_POST['action'] === 'cross_request' && !$hr_view) {
+    if ($_POST['action'] === 'cross_request') {
         $to_id = (int)($_POST['to_tl_id'] ?? 0);
         if (!$to_id || $to_id === (int)$uid) { set_flash('danger', 'Pick who to send the task to.'); header("Location: tasks.php?tab=outgoing"); exit; }
         $conn->prepare("INSERT INTO tasks (title,description,project_id,from_dept_id,to_tl_id,assigned_by,priority,due_date,estimated_hours,status) VALUES (?,?,?,?,?,?,?,?,?,'REQUESTED')")
@@ -1241,19 +1241,16 @@ if (!$hr_view) {
 }
 
 // Outgoing requests (sent by me) — show all cross-team tasks (to_tl_id set) so requester can track status
-$outgoing = [];
-if (!$hr_view) {
-    $s = $conn->prepare("SELECT t.*, u.name as tl_name, ua.name as assignee_name, p.name as project_name
-        FROM tasks t
-        LEFT JOIN users u  ON u.id=t.to_tl_id
-        LEFT JOIN users ua ON ua.id=t.assigned_to
-        LEFT JOIN projects p ON p.id=t.project_id
-        WHERE t.to_tl_id IS NOT NULL AND t.deleted_at IS NULL
-          AND (t.assigned_by=? OR t.id IN (SELECT task_id FROM task_activity_logs WHERE action='CREATED' AND user_id=?))
-        ORDER BY t.created_at DESC");
-    $s->execute([$uid, $uid]);
-    $outgoing = $s->fetchAll();
-}
+$s = $conn->prepare("SELECT t.*, u.name as tl_name, ua.name as assignee_name, p.name as project_name
+    FROM tasks t
+    LEFT JOIN users u  ON u.id=t.to_tl_id
+    LEFT JOIN users ua ON ua.id=t.assigned_to
+    LEFT JOIN projects p ON p.id=t.project_id
+    WHERE t.to_tl_id IS NOT NULL AND t.deleted_at IS NULL
+      AND (t.assigned_by=? OR t.id IN (SELECT task_id FROM task_activity_logs WHERE action='CREATED' AND user_id=?))
+    ORDER BY t.created_at DESC");
+$s->execute([$uid, $uid]);
+$outgoing = $s->fetchAll();
 
 // ── REWORK NOTES MAP ─────────────────────────────────────
 // For tasks in REWORK status, fetch the latest rework note from task_approvals
@@ -1786,7 +1783,7 @@ $status_color   = ['TODO'=>'secondary','IN_PROGRESS'=>'primary','REVIEW'=>'warni
         </h5>
         <div class="text-muted" style="font-size:.82rem;">
             <?php if ($hr_view): ?>
-                <i class="bi bi-eye me-1"></i>View-only — task progress across all teams
+                <i class="bi bi-eye me-1"></i>Task progress across all teams &amp; tasks you send
             <?php elseif ($role==='TEAM_LEAD'): ?>
                 <i class="bi bi-people me-1"></i>Manage your team's tasks &amp; approve incoming requests
             <?php elseif ($role==='SUPER_ADMIN'): ?>
@@ -1797,11 +1794,9 @@ $status_color   = ['TODO'=>'secondary','IN_PROGRESS'=>'primary','REVIEW'=>'warni
         </div>
     </div>
     <div class="d-flex gap-2 flex-wrap">
-        <?php if (!$hr_view): ?>
         <button class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#crossModal" style="border-radius:8px;">
             <i class="bi bi-send me-1"></i> Send Task
         </button>
-        <?php endif; ?>
         <?php if ($is_tl && !$hr_view): ?>
         <button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#createModal" style="border-radius:8px;">
             <i class="bi bi-plus-lg me-1"></i> Create Task
@@ -1960,12 +1955,10 @@ if (!empty($flash)): ?>
         <?php endif; ?>
     </a>
     <?php endif; ?>
-    <?php if (!$hr_view): ?>
     <a class="tm-tab <?= $tab==='outgoing'?'active':'' ?>" href="?tab=outgoing">
         <i class="bi bi-send-fill"></i> My Requests
         <span class="tab-badge"><?= count($outgoing) ?></span>
     </a>
-    <?php endif; ?>
     <?php if ($is_tl || $hr_view): ?>
     <a class="tm-tab <?= $tab==='logs'?'active':'' ?>" href="?tab=logs">
         <i class="bi bi-clock-history"></i> Activity
@@ -4692,7 +4685,6 @@ $cal_tasks_json = json_encode(array_values(array_map(function($t) {
 <?php endif; ?>
 
 <!-- Cross-Team Request Modal -->
-<?php if (!$hr_view): ?>
 <div class="modal fade" id="crossModal" tabindex="-1">
     <div class="modal-dialog modal-lg modal-dialog-centered">
         <form method="POST" class="modal-content" style="border-radius:16px;border:none;box-shadow:0 20px 60px rgba(0,0,0,.15);">
@@ -4772,7 +4764,6 @@ $cal_tasks_json = json_encode(array_values(array_map(function($t) {
         </form>
     </div>
 </div>
-<?php endif; ?>
 
 <!-- Create Own Task Modal (Employee / HR) -->
 <?php if (!$is_tl): ?>
