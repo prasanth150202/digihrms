@@ -24,6 +24,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'email' => $user['email'],
                 'role'  => $user['role'],
             ];
+            $cookieSecure = isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on';
             // If "Remember me" is checked, replace the session cookie with a 30-day persistent one
             if (!empty($_POST['remember_me'])) {
                 setcookie(session_name(), session_id(), [
@@ -31,9 +32,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'path'     => '/',
                     'httponly' => true,
                     'samesite' => 'Lax',
-                    'secure'   => isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on',
+                    'secure'   => $cookieSecure,
                 ]);
             }
+            // Always remember the email (1 year) so the login form is pre-filled next time
+            setcookie('hrms_remember_email', $user['email'], [
+                'expires'  => time() + 365 * 86400,
+                'path'     => '/',
+                'httponly' => true,
+                'samesite' => 'Lax',
+                'secure'   => $cookieSecure,
+            ]);
             header("Location: index.php");
             exit;
         } else {
@@ -43,6 +52,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $error = "Please enter email and password.";
     }
 }
+
+$rememberedEmail = $_COOKIE['hrms_remember_email'] ?? '';
+$prefillEmail    = $_POST['email'] ?? $rememberedEmail;
+$rememberChecked = !empty($_POST['remember_me']);
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -83,20 +96,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <label class="form-label fw-semibold small">Email Address</label>
             <div class="input-group">
                 <span class="input-group-text"><i class="bi bi-envelope text-muted"></i></span>
-                <input type="email" name="email" class="form-control" placeholder="you@company.com" value="<?= sanitize($_POST['email'] ?? '') ?>" required autofocus>
+                <input type="email" name="email" class="form-control" placeholder="you@company.com" value="<?= sanitize($prefillEmail) ?>" required <?= $prefillEmail === '' ? 'autofocus' : '' ?>>
             </div>
         </div>
         <div class="mb-4">
             <label class="form-label fw-semibold small">Password</label>
             <div class="input-group">
                 <span class="input-group-text"><i class="bi bi-lock text-muted"></i></span>
-                <input type="password" name="password" id="passwordField" class="form-control" placeholder="••••••••" required>
+                <input type="password" name="password" id="passwordField" class="form-control" placeholder="••••••••" required <?= $prefillEmail !== '' ? 'autofocus' : '' ?>>
                 <button type="button" class="btn btn-outline-secondary border-start-0" onclick="togglePwd()"><i class="bi bi-eye" id="eyeIcon"></i></button>
             </div>
         </div>
         <div class="d-flex justify-content-between align-items-center mb-4">
             <div class="form-check mb-0">
-                <input class="form-check-input" type="checkbox" name="remember_me" id="rememberMe" value="1">
+                <input class="form-check-input" type="checkbox" name="remember_me" id="rememberMe" value="1" <?= $rememberChecked ? 'checked' : '' ?>>
                 <label class="form-check-label small text-muted" for="rememberMe">Remember Me</label>
             </div>
         </div>
