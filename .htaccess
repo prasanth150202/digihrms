@@ -2,3 +2,11 @@ php_value session.cookie_httponly 1
 php_value session.cookie_samesite Lax
 php_value session.use_strict_mode 1
 php_value session.gc_maxlifetime 2592000
+
+# Surveys: /EHI and /Rubrics → survey.php (see survey_config.php)
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^EHI/?$     survey.php?s=EHI     [L,QSA,NC]
+    RewriteRule ^Rubrics/?$ survey.php?s=RUBRICS [L,QSA,NC]
+    RewriteRule ^survey/?$  survey.php           [L,QSA,NC]
+</IfModule>
