@@ -217,9 +217,6 @@ $periodLabel = date('F Y');
     </div>
 
 <?php else: ?>
-    <p class="small text-muted mb-3"><i class="bi bi-person-badge me-1"></i><?= $email
-        ? 'Answering as <strong>' . sanitize($email) . '</strong>. Your answers are saved with your name and HR can see them.'
-        : 'Your answers will be saved without your name.' ?></p>
     <div class="sv-progress"><div id="svBar" style="width:0"></div></div>
     <div id="svStep"></div>
     <div class="alert alert-danger small py-2 mt-3 d-none" id="svErr"></div>
