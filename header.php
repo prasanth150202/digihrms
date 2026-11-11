@@ -724,6 +724,11 @@
     <a href="reports.php" class="nav-link <?= ($page ?? '') === 'reports' ? 'active' : '' ?>">
         <i class="bi bi-bar-chart-line"></i> Reports
     </a>
+    <?php if (has_role('SUPER_ADMIN','HR_ADMIN')): ?>
+    <a href="survey_results.php" class="nav-link <?= ($page ?? '') === 'survey_results' ? 'active' : '' ?>">
+        <i class="bi bi-clipboard-data"></i> Survey Results
+    </a>
+    <?php endif; ?>
     <?php endif; ?>
 
     <!-- ── Admin (SUPER_ADMIN only) ──────────────────── -->
