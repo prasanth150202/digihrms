@@ -27,7 +27,45 @@ function survey_already_done(PDO $conn, string $key, string $period, string $ema
     return (bool)$s->fetchColumn();
 }
 
+// Browser memory of finished surveys: cookie sv_done_<KEY> = YYYY-MM. Covers
+// people with no email cookie too, and drives the "do the other one" prompt.
+function survey_done_cookie(string $key, string $period): bool {
+    return ($_COOKIE['sv_done_' . $key] ?? '') === $period;
+}
+
+function survey_set_done_cookie(string $key, string $period): void {
+    setcookie('sv_done_' . $key, $period, [
+        'expires'  => time() + 45 * 86400,
+        'path'     => '/',
+        'httponly' => true,
+        'samesite' => 'Lax',
+        'secure'   => isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on',
+    ]);
+    $_COOKIE['sv_done_' . $key] = $period;
+}
+
+function survey_is_done(PDO $conn, string $key, string $period, ?string $email): bool {
+    return survey_done_cookie($key, $period) || ($email && survey_already_done($conn, $key, $period, $email));
+}
+
+// The next open survey this person still has to do this month, as an HTML card ('' if none).
+function survey_next_html(PDO $conn, array $defs, string $current, string $period, ?string $email, string $base): string {
+    foreach ($defs as $k => $d) {
+        if ($k === $current || empty($d['is_open']) || survey_is_done($conn, $k, $period, $email)) continue;
+        $nq  = array_sum(array_map(fn($dim) => count($dim['questions']), $d['dimensions']));
+        $min = max(2, (int)ceil($nq * 10 / 60) + 1);
+        return '<div class="border rounded-3 p-3 mt-4 text-start">'
+             . '<div class="small text-muted">One more survey for ' . sanitize(date('F')) . '</div>'
+             . '<div class="fw-semibold">' . sanitize($d['title']) . '</div>'
+             . '<div class="small text-muted mb-2">About ' . $min . ' minutes</div>'
+             . '<a class="btn btn-sv" href="' . sanitize($base . survey_path($k)) . '">Start now <i class="bi bi-arrow-right ms-1"></i></a>'
+             . '</div>';
+    }
+    return '<p class="small text-muted mt-3 mb-0">That\'s every survey for this month. Thank you!</p>';
+}
+
 $email = survey_respondent_email();
+$base  = rtrim(dirname($_SERVER['SCRIPT_NAME']), '/') . '/';
 
 // ── Submit (JSON) ────────────────────────────────────────────────────────────
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -46,6 +84,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $team = $in['team'] ?? '';
     if (empty($survey['is_open']))              $fail(403, 'This survey is closed.');
     if (!in_array($team, $survey['teams'], true)) $fail(422, 'Please choose your team.');
+    $alreadyDone = function () use ($conn, $defs, $key, $period, $email, $base) {
+        survey_set_done_cookie($key, $period);
+        http_response_code(409);
+        echo json_encode(['ok' => false, 'error' => 'You have already completed this survey this month. Thank you!',
+                          'next_html' => survey_next_html($conn, $defs, $key, $period, $email, $base)]);
+        exit;
+    };
+    if (survey_done_cookie($key, $period)) $alreadyDone();
 
     $inAnswers = is_array($in['answers'] ?? null) ? $in['answers'] : [];
     $inOpen    = is_array($in['open'] ?? null)    ? $in['open']    : [];
@@ -88,12 +134,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $conn->commit();
     } catch (PDOException $e) {
         if ($conn->inTransaction()) $conn->rollBack();
-        if ($e->getCode() === '23000') $fail(409, 'You have already completed this survey this month. Thank you!');
+        if ($e->getCode() === '23000') $alreadyDone();
         error_log('survey submit failed: ' . $e->getMessage());
         $fail(500, 'We could not save your answers. Please try again.');
     }
 
-    echo json_encode(['ok' => true]);
+    survey_set_done_cookie($key, $period);
+    echo json_encode(['ok' => true, 'next_html' => survey_next_html($conn, $defs, $key, $period, $email, $base)]);
     exit;
 }
 
@@ -101,9 +148,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 $state = 'form';
 if (!$survey)                                                         $state = 'pick';
 elseif (empty($survey['is_open']))                                    $state = 'closed';
-elseif ($email && survey_already_done($conn, $key, $period, $email))  $state = 'done';
-
-$base = rtrim(dirname($_SERVER['SCRIPT_NAME']), '/') . '/';
+elseif (survey_is_done($conn, $key, $period, $email))                 $state = 'done';
 $periodLabel = date('F Y');
 ?>
 <!DOCTYPE html>
@@ -168,6 +213,7 @@ $periodLabel = date('F Y');
         <i class="bi bi-check-circle-fill text-success" style="font-size:48px"></i>
         <h4 class="fw-bold mt-3">You're all done for <?= sanitize($periodLabel) ?></h4>
         <p class="text-muted mb-0">Thanks for completing the <?= sanitize($survey['title']) ?>. The next round opens next month.</p>
+        <?= survey_next_html($conn, $defs, $key, $period, $email, $base) ?>
     </div>
 
 <?php else: ?>
@@ -304,7 +350,8 @@ $periodLabel = date('F Y');
             $('svStep').innerHTML = `<div class="text-center py-3">
                 <i class="bi bi-check-circle-fill text-success" style="font-size:48px"></i>
                 <h4 class="fw-bold mt-3">Thank you!</h4>
-                <p class="text-muted mb-0">${esc(r.status === 409 ? data.error : 'Your answers have been recorded.')}</p></div>`;
+                <p class="text-muted mb-0">${esc(r.status === 409 ? data.error : 'Your answers have been recorded.')}</p>
+                ${data.next_html || ''}</div>`;
         } catch (err) {
             showErr(err.message);
             $('svNext').disabled = $('svBack').disabled = false;
