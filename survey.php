@@ -1,10 +1,11 @@
 <?php
 // Anonymous surveys: /EHI and /Rubrics (rewritten to survey.php?s=… in .htaccess).
 //
-// Who is answering comes from the logged-in session, or failing that from the
-// hrms_remember_email cookie that login.php sets. That email goes ONLY into
-// survey_participants (to stop repeat submissions); the answers go into
-// survey_responses with no email, no user id and no timestamp. See migrate_surveys.php.
+// No login, no email form. If the hrms_remember_email cookie is there (set by
+// login.php), that email goes ONLY into survey_participants (to stop repeat
+// submissions). No cookie → the answers are saved without any email. Answers go
+// into survey_responses with no email, no user id and no timestamp.
+// See migrate_surveys.php.
 
 require_once 'config.php';
 require_once 'survey_config.php';
@@ -15,16 +16,9 @@ if ($key === 'RUBRIC') $key = 'RUBRICS';
 $survey = $defs[$key] ?? null;
 $period = survey_period();
 
-function survey_respondent_email(PDO $conn): ?string {
-    $email = $_SESSION['user']['email'] ?? ($_COOKIE['hrms_remember_email'] ?? '');
-    $email = strtolower(trim((string)$email));
-    if ($email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) return null;
-    // Only real, active HRMS users — the cookie is client-side and could be edited.
-    $s = $conn->prepare("SELECT * FROM users WHERE email = ? LIMIT 1");
-    $s->execute([$email]);
-    $u = $s->fetch();
-    if (!$u || ($u['invite_status'] ?? 'ACTIVE') !== 'ACTIVE') return null;
-    return strtolower(trim($u['email']));
+function survey_respondent_email(): ?string {
+    $email = strtolower(trim((string)($_COOKIE['hrms_remember_email'] ?? ($_SESSION['user']['email'] ?? ''))));
+    return filter_var($email, FILTER_VALIDATE_EMAIL) ? $email : null;
 }
 
 function survey_already_done(PDO $conn, string $key, string $period, string $email): bool {
@@ -33,7 +27,7 @@ function survey_already_done(PDO $conn, string $key, string $period, string $ema
     return (bool)$s->fetchColumn();
 }
 
-$email = survey_respondent_email($conn);
+$email = survey_respondent_email();
 
 // ── Submit (JSON) ────────────────────────────────────────────────────────────
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -48,7 +42,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!is_array($in))                         $fail(400, 'Invalid request.');
     if (!verify_csrf($in['csrf'] ?? ''))        $fail(403, 'Your session expired. Reload the page and try again.');
     if (!$survey)                               $fail(404, 'Unknown survey.');
-    if (!$email)                                $fail(401, 'We could not identify you. Log in to HRMS once, then open this survey again.');
 
     $team = $in['team'] ?? '';
     if (!in_array($team, SURVEY_TEAMS, true))   $fail(422, 'Please choose your team.');
@@ -82,8 +75,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $conn->exec("SET NAMES utf8mb4"); // written answers may contain emoji
         $conn->beginTransaction();
         // Participant row first: its UNIQUE key is what blocks a second submission.
-        $conn->prepare("INSERT INTO survey_participants (survey, period, email) VALUES (?, ?, ?)")
-             ->execute([$key, $period, $email]);
+        if ($email) {
+            $conn->prepare("INSERT INTO survey_participants (survey, period, email) VALUES (?, ?, ?)")
+                 ->execute([$key, $period, $email]);
+        }
         $conn->prepare("INSERT INTO survey_responses
                 (id, survey, period, team, answers, enps, open_change, open_keep, open_frustrates)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
@@ -103,9 +98,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 // ── Page ─────────────────────────────────────────────────────────────────────
 $state = 'form';
-if (!$survey)                                               $state = 'pick';
-elseif (!$email)                                            $state = 'login';
-elseif (survey_already_done($conn, $key, $period, $email))  $state = 'done';
+if (!$survey)                                                         $state = 'pick';
+elseif ($email && survey_already_done($conn, $key, $period, $email))  $state = 'done';
 
 $base = rtrim(dirname($_SERVER['SCRIPT_NAME']), '/') . '/';
 $periodLabel = date('F Y');
@@ -160,12 +154,6 @@ $periodLabel = date('F Y');
         <a href="<?= $base ?>Rubrics"><div class="fw-semibold">Team Performance Rubrics</div><div class="small text-muted">Rate how your team works together · about 3 minutes</div></a>
     </div>
 
-<?php elseif ($state === 'login'): ?>
-    <h4 class="fw-bold">Log in first</h4>
-    <p class="text-muted">We need to know you're a Digifyce team member so each person answers once. Your answers are still stored anonymously, separate from your name and email.</p>
-    <a class="btn btn-sv" href="<?= $base ?>login.php">Log in to HRMS</a>
-    <p class="small text-muted mt-3 mb-0">After logging in, open this survey link again.</p>
-
 <?php elseif ($state === 'done'): ?>
     <div class="text-center py-3">
         <i class="bi bi-check-circle-fill text-success" style="font-size:48px"></i>
@@ -190,10 +178,9 @@ $periodLabel = date('F Y');
     const SURVEY = <?= json_encode($survey, JSON_HEX_TAG | JSON_HEX_AMP | JSON_UNESCAPED_UNICODE) ?>;
     const TEAMS  = <?= json_encode(SURVEY_TEAMS) ?>;
     const CSRF   = <?= json_encode(csrf_token()) ?>;
-    const PERIOD = <?= json_encode($periodLabel) ?>;
     const TEXT_MAX = <?= SURVEY_TEXT_MAX ?>;
 
-    const steps = [{ type: 'welcome' }, { type: 'team' }]
+    const steps = [{ type: 'team' }]
         .concat(SURVEY.dimensions.map((d, i) => ({ type: 'dim', dim: d, n: i + 1 })));
     if (SURVEY.enps) steps.push({ type: 'enps' });
     if (Object.keys(SURVEY.open).length) steps.push({ type: 'open' });
@@ -218,11 +205,7 @@ $periodLabel = date('F Y');
         const last = idx === steps.length - 1;
         let html = '';
 
-        if (s.type === 'welcome') {
-            html = `<h4 class="fw-bold">${esc(SURVEY.title)}</h4>
-                    <p class="text-muted">${esc(SURVEY.intro)}</p>
-                    <p class="small text-muted mb-0"><i class="bi bi-shield-lock me-1"></i>${PERIOD} round · one response per person.</p>`;
-        } else if (s.type === 'team') {
+        if (s.type === 'team') {
             html = `<div class="sv-step-label">About you</div>
                     <h5 class="fw-bold mt-1 mb-3">Which team are you on?</h5>
                     <div class="sv-team">${radios('team', TEAMS, st.team)}</div>`;
@@ -255,7 +238,7 @@ $periodLabel = date('F Y');
         $('svStep').innerHTML = html;
         $('svBar').style.width = Math.round(idx / steps.length * 100) + '%';
         $('svBack').style.visibility = idx === 0 ? 'hidden' : 'visible';
-        $('svNext').textContent = idx === 0 ? 'Start' : (last ? 'Submit' : 'Next');
+        $('svNext').textContent = last ? 'Submit' : 'Next';
         hideErr();
         window.scrollTo({ top: 0, behavior: 'smooth' });
     }
