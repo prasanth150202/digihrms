@@ -1,16 +1,16 @@
 <?php
-// Anonymous surveys: /EHI and /Rubrics (rewritten to survey.php?s=… in .htaccess).
+// Surveys: /EHI and /Rubrics (rewritten to survey.php?s=… in .htaccess).
 //
 // No login, no email form. If the hrms_remember_email cookie is there (set by
-// login.php), that email goes ONLY into survey_participants (to stop repeat
-// submissions). No cookie → the answers are saved without any email. Answers go
-// into survey_responses with no email, no user id and no timestamp.
-// See migrate_surveys.php.
+// login.php), its email is saved WITH the answers (HR can see who said what) and
+// in survey_participants (one response per survey per month). No cookie → the
+// answers are saved without a name. Admins open/close and edit surveys on
+// survey_manage.php; tables are created by survey_ensure_schema().
 
 require_once 'config.php';
 require_once 'survey_config.php';
 
-$defs = survey_definitions();
+$defs = survey_definitions($conn);
 $key  = strtoupper(trim((string)($_GET['s'] ?? '')));
 if ($key === 'RUBRIC') $key = 'RUBRICS';
 $survey = $defs[$key] ?? null;
@@ -44,7 +44,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!$survey)                               $fail(404, 'Unknown survey.');
 
     $team = $in['team'] ?? '';
-    if (!in_array($team, SURVEY_TEAMS, true))   $fail(422, 'Please choose your team.');
+    if (empty($survey['is_open']))              $fail(403, 'This survey is closed.');
+    if (!in_array($team, $survey['teams'], true)) $fail(422, 'Please choose your team.');
 
     $inAnswers = is_array($in['answers'] ?? null) ? $in['answers'] : [];
     $inOpen    = is_array($in['open'] ?? null)    ? $in['open']    : [];
@@ -80,9 +81,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                  ->execute([$key, $period, $email]);
         }
         $conn->prepare("INSERT INTO survey_responses
-                (id, survey, period, team, answers, enps, open_change, open_keep, open_frustrates)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
-             ->execute([bin2hex(random_bytes(16)), $key, $period, $team, json_encode($answers),
+                (id, survey, period, email, submitted_at, team, answers, enps, open_change, open_keep, open_frustrates)
+                VALUES (?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, ?)")
+             ->execute([bin2hex(random_bytes(16)), $key, $period, $email, $team, json_encode($answers),
                         $enps, $open['change'], $open['keep'], $open['frustrates']]);
         $conn->commit();
     } catch (PDOException $e) {
@@ -99,6 +100,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 // ── Page ─────────────────────────────────────────────────────────────────────
 $state = 'form';
 if (!$survey)                                                         $state = 'pick';
+elseif (empty($survey['is_open']))                                    $state = 'closed';
 elseif ($email && survey_already_done($conn, $key, $period, $email))  $state = 'done';
 
 $base = rtrim(dirname($_SERVER['SCRIPT_NAME']), '/') . '/';
@@ -154,6 +156,13 @@ $periodLabel = date('F Y');
         <a href="<?= $base ?>Rubrics"><div class="fw-semibold">Team Performance Rubrics</div><div class="small text-muted">Rate how your team works together · about 3 minutes</div></a>
     </div>
 
+<?php elseif ($state === 'closed'): ?>
+    <div class="text-center py-3">
+        <i class="bi bi-lock-fill text-secondary" style="font-size:48px"></i>
+        <h4 class="fw-bold mt-3">This survey is closed</h4>
+        <p class="text-muted mb-0">The <?= sanitize($survey['title']) ?> isn't taking answers right now. Check back when HR opens the next round.</p>
+    </div>
+
 <?php elseif ($state === 'done'): ?>
     <div class="text-center py-3">
         <i class="bi bi-check-circle-fill text-success" style="font-size:48px"></i>
@@ -162,6 +171,9 @@ $periodLabel = date('F Y');
     </div>
 
 <?php else: ?>
+    <p class="small text-muted mb-3"><i class="bi bi-person-badge me-1"></i><?= $email
+        ? 'Answering as <strong>' . sanitize($email) . '</strong>. Your answers are saved with your name and HR can see them.'
+        : 'Your answers will be saved without your name.' ?></p>
     <div class="sv-progress"><div id="svBar" style="width:0"></div></div>
     <div id="svStep"></div>
     <div class="alert alert-danger small py-2 mt-3 d-none" id="svErr"></div>
@@ -176,7 +188,7 @@ $periodLabel = date('F Y');
 <script>
 (() => {
     const SURVEY = <?= json_encode($survey, JSON_HEX_TAG | JSON_HEX_AMP | JSON_UNESCAPED_UNICODE) ?>;
-    const TEAMS  = <?= json_encode(SURVEY_TEAMS) ?>;
+    const TEAMS  = <?= json_encode($survey['teams'], JSON_HEX_TAG | JSON_HEX_AMP) ?>;
     const CSRF   = <?= json_encode(csrf_token()) ?>;
     const TEXT_MAX = <?= SURVEY_TEXT_MAX ?>;
 
@@ -227,7 +239,7 @@ $periodLabel = date('F Y');
         } else if (s.type === 'open') {
             html = `<div class="sv-step-label">Your voice matters</div>
                     <h5 class="fw-bold mt-1 mb-1">In your own words</h5>
-                    <p class="small text-muted">Optional. Please don't include names if you want to stay anonymous.</p>` +
+                    <p class="small text-muted">Optional.</p>` +
                 Object.entries(SURVEY.open).map(([k, text]) => `
                     <div class="mb-3">
                         <label class="form-label fw-medium" for="open_${k}">${esc(text)}</label>
@@ -292,7 +304,7 @@ $periodLabel = date('F Y');
             $('svStep').innerHTML = `<div class="text-center py-3">
                 <i class="bi bi-check-circle-fill text-success" style="font-size:48px"></i>
                 <h4 class="fw-bold mt-3">Thank you!</h4>
-                <p class="text-muted mb-0">${esc(r.status === 409 ? data.error : 'Your answers have been recorded anonymously.')}</p></div>`;
+                <p class="text-muted mb-0">${esc(r.status === 409 ? data.error : 'Your answers have been recorded.')}</p></div>`;
         } catch (err) {
             showErr(err.message);
             $('svNext').disabled = $('svBack').disabled = false;

@@ -766,6 +766,8 @@ include 'header.php';
     </div>
 </div>
 
+<?php include __DIR__ . '/survey_home_card.php'; ?>
+
 <!-- Charts -->
 <div class="row g-3 mb-4">
     <div class="col-md-8">
