@@ -253,14 +253,18 @@ function survey_load_responses(PDO $conn, string $key, ?string $period = null): 
 }
 
 // Active HRMS users who haven't taken this survey in this period (by email).
+// Matched in PHP, not with a cross-table SQL join: on newer MariaDB the survey
+// tables get utf8mb4_uca1400_ai_ci while users is utf8mb4_unicode_ci, and
+// comparing the two columns fails with "Illegal mix of collations".
 function survey_pending_users(PDO $conn, string $key, string $period): array {
-    $s = $conn->prepare("SELECT u.id, u.name, u.email, u.role FROM users u
-        WHERE COALESCE(u.invite_status, 'ACTIVE') = 'ACTIVE' AND u.email IS NOT NULL AND u.email <> ''
-          AND NOT EXISTS (SELECT 1 FROM survey_participants p
-                          WHERE p.survey = ? AND p.period = ? AND p.email = LOWER(TRIM(u.email)))
-        ORDER BY u.name");
-    $s->execute([$key, $period]);
-    return $s->fetchAll();
+    $p = $conn->prepare("SELECT email FROM survey_participants WHERE survey = ? AND period = ?");
+    $p->execute([$key, $period]);
+    $done = array_flip(array_map(fn($e) => strtolower(trim((string)$e)), $p->fetchAll(PDO::FETCH_COLUMN)));
+
+    $users = $conn->query("SELECT id, name, email, role FROM users
+        WHERE COALESCE(invite_status, 'ACTIVE') = 'ACTIVE' AND email IS NOT NULL AND email <> ''
+        ORDER BY name")->fetchAll();
+    return array_values(array_filter($users, fn($u) => !isset($done[strtolower(trim($u['email']))])));
 }
 
 // Public survey path for a key (matches the .htaccess rewrites).
